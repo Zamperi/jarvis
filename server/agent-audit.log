@@ -1,0 +1,4 @@
+{"ts":"2025-11-30T06:02:23.039Z","op":"write","relativePath":"playground/test.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test.txt","ok":true}
+{"ts":"2025-11-30T06:02:39.528Z","op":"write","relativePath":"playground/test2.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test2.txt","ok":true}
+{"ts":"2025-11-30T06:07:52.744Z","op":"write","relativePath":"playground/test-ok.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test-ok.txt","ok":true}
+{"ts":"2025-11-30T06:07:52.746Z","op":"write","relativePath":"../blocked.txt","ok":false,"error":"Path outside project root blocked: ../blocked.txt -> C:\\codes\\agent\\blocked.txt"}
