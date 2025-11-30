@@ -2,3 +2,9 @@
 {"ts":"2025-11-30T06:02:39.528Z","op":"write","relativePath":"playground/test2.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test2.txt","ok":true}
 {"ts":"2025-11-30T06:07:52.744Z","op":"write","relativePath":"playground/test-ok.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test-ok.txt","ok":true}
 {"ts":"2025-11-30T06:07:52.746Z","op":"write","relativePath":"../blocked.txt","ok":false,"error":"Path outside project root blocked: ../blocked.txt -> C:\\codes\\agent\\blocked.txt"}
+{"ts":"2025-11-30T06:44:07.159Z","role":"coder","op":"write","relativePath":"playground/test1.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test1.txt","ok":true}
+{"ts":"2025-11-30T06:44:29.055Z","role":"coder","op":"write","relativePath":"playground/test1.txt","absolutePath":"C:\\codes\\agent\\server\\playground\\test1.txt","ok":true}
+{"ts":"2025-11-30T06:48:33.672Z","role":"coder","op":"read","relativePath":"README.md","ok":false,"error":"Policy violation: role \"coder\" not allowed to read \"README.md\""}
+{"ts":"2025-11-30T06:48:54.356Z","role":"coder","op":"read","relativePath":"src","ok":false,"error":"Policy violation: role \"coder\" not allowed to read \"src\""}
+{"ts":"2025-11-30T06:49:36.061Z","role":"coder","op":"read","relativePath":"src/index.js","absolutePath":"C:\\codes\\agent\\server\\src\\index.js","ok":false,"error":"ENOENT: no such file or directory, open 'C:\\codes\\agent\\server\\src\\index.js'"}
+{"ts":"2025-11-30T06:57:02.323Z","role":"coder","op":"read","relativePath":"src/","absolutePath":"C:\\codes\\agent\\server\\src","ok":true}

@@ -1,5 +1,6 @@
 import { openaiClient, azureConfig } from "../config/azure";
-import { readFileSafe, writeFileSafe } from "../tools/fileTools";
+import { readFileSafe, writeFileSafe, listDirSafe } from "../tools/fileTools";
+import { AgentRole } from "../config/projectConfig";
 
 export interface AgentMessage {
   role: "system" | "user" | "assistant";
@@ -47,10 +48,28 @@ const tools: any[] = [
         required: ["path", "content"]
       }
     }
-  }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_files",
+      description:
+        "List files and directories inside a given directory path within the project.",
+      parameters: {
+        type: "object",
+        properties: {
+          dir: { type: "string", description: "Directory path, e.g. 'src/'" },
+        },
+        required: ["dir"],
+      },
+    },
+  },
 ];
 
 export async function runAgent(messages: AgentMessage[]): Promise<string> {
+
+  const role: AgentRole = "coder";
+
   const openaiMessages: any[] = messages.map((m) => ({
     role: m.role,
     content: m.content
@@ -101,7 +120,7 @@ export async function runAgent(messages: AgentMessage[]): Promise<string> {
             if (!parsedArgs.path || typeof parsedArgs.path !== "string") {
               throw new Error("read_file: path puuttuu tai ei ole string.");
             }
-            const content = await readFileSafe(parsedArgs.path);
+            const content = await readFileSafe(role, parsedArgs.path);
             toolResult = content;
           } else if (toolName === "write_file") {
             if (!parsedArgs.path || typeof parsedArgs.path !== "string") {
@@ -110,11 +129,18 @@ export async function runAgent(messages: AgentMessage[]): Promise<string> {
             if (typeof parsedArgs.content !== "string") {
               throw new Error("write_file: content täytyy olla string.");
             }
-            await writeFileSafe(parsedArgs.path, parsedArgs.content);
+            await writeFileSafe(role, parsedArgs.path, parsedArgs.content);
             toolResult = `Tiedosto '${parsedArgs.path}' kirjoitettu onnistuneesti.`;
+          } else if (toolName === "list_files") {
+            if (!parsedArgs.dir || typeof parsedArgs.dir !== "string") {
+              throw new Error("list_files: dir puuttuu tai ei ole string.");
+            }
+            const entries = await listDirSafe(role, parsedArgs.dir);
+            toolResult = JSON.stringify(entries);
           } else {
             toolResult = `Tuntematon työkalu: ${toolName}`;
           }
+
         } catch (err: any) {
           toolResult = `Työkalun ${toolName} suoritus epäonnistui: ${err.message ?? String(err)}`;
         }

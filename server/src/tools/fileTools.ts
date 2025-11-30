@@ -153,3 +153,51 @@ export async function writeFileSafe(
     throw err;
   }
 }
+
+export interface SafeDirEntry {
+  name: string;
+  kind: "file" | "dir";
+}
+
+export async function listDirSafe(
+  role: AgentRole,
+  dirPath: string
+): Promise<SafeDirEntry[]> {
+  const normalized = normalizeRelativePath(
+    dirPath.endsWith("/") ? dirPath : dirPath + "/"
+  );
+
+  // kohdellaan katalogia "read"-oikeutena
+  checkFilePolicy(role, "read", normalized);
+  const absDir = resolveProjectPath(normalized);
+
+  let entries: SafeDirEntry[] = [];
+
+  try {
+    const dirEntries = await fs.readdir(absDir, { withFileTypes: true });
+    entries = dirEntries.map((e) => ({
+      name: e.name,
+      kind: e.isDirectory() ? "dir" : "file",
+    }));
+
+    await appendAuditLog({
+      role,
+      op: "read",
+      relativePath: normalized,
+      absolutePath: absDir,
+      ok: true,
+    });
+
+    return entries;
+  } catch (err: any) {
+    await appendAuditLog({
+      role,
+      op: "read",
+      relativePath: normalized,
+      absolutePath: absDir,
+      ok: false,
+      error: err?.message ?? String(err),
+    });
+    throw err;
+  }
+}
