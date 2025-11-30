@@ -2,50 +2,81 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { PROJECT_ROOT, AgentRole } from "../config/projectConfig";
-import { Run, RunStep, RunStepToolUsage } from "./runTypes";
+import { Run, RunStatus, RunStep, RunStepToolUsage } from "./runTypes";
 
 const DATA_DIR = path.join(PROJECT_ROOT, "data");
 const RUNS_FILE = path.join(DATA_DIR, "runs.ndjson");
 const STEPS_FILE = path.join(DATA_DIR, "run_steps.ndjson");
 
-async function ensureDataFiles() {
+async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  // tiedostojen ei ole pakko olla olemassa etukäteen, appendFile luo ne tarvittaessa
 }
 
-function newId() {
-  return crypto.randomUUID();
+function newId(): string {
+  return crypto.randomBytes(16).toString("hex");
 }
 
-export async function createRun(role: AgentRole): Promise<Run> {
-  await ensureDataFiles();
+export async function createRun(
+  role: AgentRole,
+  projectRoot?: string
+): Promise<Run> {
+  await ensureDataDir();
   const run: Run = {
     id: newId(),
     createdAt: new Date().toISOString(),
     role,
     status: "running",
+    projectRoot,
   };
 
-  const line = JSON.stringify(run) + "\n";
-  await fs.appendFile(RUNS_FILE, line, { encoding: "utf8", flag: "a" });
-
+  await fs.appendFile(RUNS_FILE, JSON.stringify(run) + "\n", "utf8");
   return run;
+}
+
+export async function updateRunStatus(
+  runId: string,
+  status: RunStatus
+): Promise<void> {
+  await ensureDataDir();
+  let raw: string;
+  try {
+    raw = await fs.readFile(RUNS_FILE, "utf8");
+  } catch {
+    return;
+  }
+
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const updated: Run[] = [];
+
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line) as Run;
+      if (obj.id === runId) {
+        obj.status = status;
+      }
+      updated.push(obj);
+    } catch {
+      // rikkinäinen rivi ohitetaan
+    }
+  }
+
+  const out = updated.map((r) => JSON.stringify(r)).join("\n") + "\n";
+  await fs.writeFile(RUNS_FILE, out, "utf8");
 }
 
 export async function addRunStep(params: {
   runId: string;
+  index: number;
   agentRole: AgentRole;
   inputMessage: string;
   outputMessage: string;
   usedTools: RunStepToolUsage[];
 }): Promise<RunStep> {
-  await ensureDataFiles();
-
-  const existing = await getRunSteps(params.runId);
+  await ensureDataDir();
   const step: RunStep = {
     id: newId(),
     runId: params.runId,
-    index: existing.length,
+    index: params.index,
     inputMessage: params.inputMessage,
     agentRole: params.agentRole,
     outputMessage: params.outputMessage,
@@ -53,25 +84,22 @@ export async function addRunStep(params: {
     createdAt: new Date().toISOString(),
   };
 
-  const line = JSON.stringify(step) + "\n";
-  await fs.appendFile(STEPS_FILE, line, { encoding: "utf8", flag: "a" });
-
+  await fs.appendFile(STEPS_FILE, JSON.stringify(step) + "\n", "utf8");
   return step;
 }
 
 export async function getRunSteps(runId: string): Promise<RunStep[]> {
-  await ensureDataFiles();
-
-  let content: string;
+  await ensureDataDir();
+  let raw: string;
   try {
-    content = await fs.readFile(STEPS_FILE, "utf8");
+    raw = await fs.readFile(STEPS_FILE, "utf8");
   } catch {
     return [];
   }
 
-  const lines = content.split("\n").filter((l) => l.trim().length > 0);
-
   const steps: RunStep[] = [];
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+
   for (const line of lines) {
     try {
       const obj = JSON.parse(line) as RunStep;
@@ -83,7 +111,6 @@ export async function getRunSteps(runId: string): Promise<RunStep[]> {
     }
   }
 
-  // varmistetaan järjestys
   steps.sort((a, b) => a.index - b.index);
   return steps;
 }

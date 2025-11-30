@@ -15,104 +15,106 @@ function parseRole(value: string | undefined): AgentRole | null {
   return null;
 }
 
-function getRoleFromArgs(): AgentRole {
-  const args = process.argv.slice(2);
-  const idx = args.findIndex((a) => a === "--role" || a === "-r");
-  if (idx !== -1 && args[idx + 1]) {
-    const parsed = parseRole(args[idx + 1]);
-    if (parsed) return parsed;
-    console.warn(`Tuntematon rooli "${args[idx + 1]}". Käytetään oletusta "coder".`);
-  }
-  return "coder";
-}
+// komentoriviltä: --project C:\codes\movieapp
+const projectArgIndex = process.argv.indexOf("--project");
+const cliProjectRoot =
+  projectArgIndex > -1 ? process.argv[projectArgIndex + 1] : undefined;
 
-async function askOnce(
-  question: string,
-  role: AgentRole,
-  runId: string | null
-): Promise<{ reply: string; runId: string }> {
-  const payload: any = { message: question, role };
-  if (runId) {
-    payload.runId = runId;
-  }
+let currentRole: AgentRole = "coder";
+let currentProjectRoot: string | undefined =
+  cliProjectRoot || process.env.AGENT_PROJECT_ROOT || undefined;
+let currentRunId: string | "-" = "-";
 
-  const response = await axios.post(API_URL, payload);
-  const data = response.data as { reply: string; runId: string };
-  return { reply: data.reply, runId: data.runId };
+function buildPrompt(): string {
+  const projLabel = currentProjectRoot ?? "-";
+  return `[${currentRole}][proj:${projLabel}][run:${currentRunId}] > `;
 }
 
 function startCli() {
-  let currentRole: AgentRole = getRoleFromArgs();
-  let currentRunId: string | null = null;
-
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
+    prompt: buildPrompt(),
   });
 
-  const updatePrompt = () => {
-    const runPart = currentRunId ? currentRunId.slice(0, 8) : "-";
-    rl.setPrompt(`[${currentRole}][run:${runPart}] > `);
-  };
-
-  updatePrompt();
-
-  rl.on("line", async (line: string) => {
+  rl.on("line", async (line) => {
     const trimmed = line.trim();
-
     if (!trimmed) {
-      updatePrompt();
+      rl.setPrompt(buildPrompt());
       rl.prompt();
       return;
     }
 
-    if (trimmed.toLowerCase() === "exit" || trimmed.toLowerCase() === "quit") {
-      console.log("Poistutaan.");
+    if (trimmed === "exit") {
       rl.close();
       return;
     }
 
-    // roolin vaihto: /role documenter
-    if (trimmed.toLowerCase().startsWith("/role")) {
-      const [, maybeRole] = trimmed.split(/\s+/, 2);
-      const parsed = parseRole(maybeRole);
-
-      if (!maybeRole) {
+    if (trimmed.startsWith("/role ")) {
+      const parts = trimmed.split(/\s+/);
+      const candidate = parseRole(parts[1]);
+      if (!candidate) {
         console.log(
-          `Nykyinen rooli: ${currentRole}. Käytä: /role planner|coder|tester|critic|documenter`
-        );
-      } else if (!parsed) {
-        console.log(
-          `Tuntematon rooli "${maybeRole}". Sallitut: planner, coder, tester, critic, documenter.`
+          "Tuntematon rooli. Sallitut: planner, coder, tester, critic, documenter"
         );
       } else {
-        currentRole = parsed;
+        currentRole = candidate;
         console.log(`Rooli vaihdettu: ${currentRole}`);
       }
+      rl.setPrompt(buildPrompt());
+      rl.prompt();
+      return;
+    }
 
-      updatePrompt();
+    if (trimmed.startsWith("/project ")) {
+      const newRoot = trimmed.slice("/project ".length).trim();
+      if (!newRoot) {
+        console.log("Anna projektihakemisto, esim: /project C:\\codes\\movieapp");
+      } else {
+        currentProjectRoot = newRoot;
+        console.log(`Projektijuuri asetettu: ${currentProjectRoot}`);
+      }
+      rl.setPrompt(buildPrompt());
       rl.prompt();
       return;
     }
 
     try {
-      const { reply, runId } = await askOnce(trimmed, currentRole, currentRunId);
+      const payload: any = {
+        message: trimmed,
+        role: currentRole,
+      };
+      if (currentProjectRoot) {
+        payload.projectRoot = currentProjectRoot;
+      }
+
+      const resp = await axios.post(API_URL, payload);
+
+      const reply = resp.data.reply;
+      const runId = resp.data.runId ?? "-";
       currentRunId = runId;
 
-      console.log("\n[Agentti]:");
-      console.log(reply);
+      console.log(`\n[agent/${currentRole}]: ${reply}\n`);
     } catch (err: any) {
-      console.error("Virhe kutsussa:", err.response?.data || err.message);
+      if (err?.response?.status === 429 && err?.response?.data?.error === "rate_limit") {
+        console.error(
+          "Azure OpenAI -ratelimit: " + (err.response.data.message ?? "raja ylittyi.")
+        );
+      } else {
+        console.error("Virhe kutsussa:", err?.message ?? err);
+      }
     }
 
-    updatePrompt();
+    rl.setPrompt(buildPrompt());
     rl.prompt();
   });
 
   console.log(
     "Samuli-agentti CLI.\n" +
-    "- käytä /role planner|coder|tester|critic|documenter roolin vaihtoon\n" +
-    "- kirjoita 'exit' poistuaksesi\n"
+    "- /role planner|coder|tester|critic|documenter → vaihda roolia\n" +
+    "- /project C:\\polku\\projektiin → vaihda kohdeprojektia\n" +
+    "- 'exit' → poistu\n" +
+    "- voit antaa myös --project C:\\polku komentorivillä"
   );
 
   rl.prompt();

@@ -7,6 +7,7 @@ export interface Run {
   createdAt: string;
   role: AgentRole;
   status: RunStatus;
+  projectRoot?: string; // mihin projektiin tämä ajo liittyi
 }
 
 export interface RunStepToolUsage {

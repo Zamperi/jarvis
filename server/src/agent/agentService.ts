@@ -1,169 +1,472 @@
+// src/agent/agentService.ts
+import path from "path";
 import { openaiClient, azureConfig } from "../config/azure";
-import { readFileSafe, writeFileSafe, listDirSafe } from "../tools/fileTools";
-import { AgentRole } from "../config/projectConfig";
+import {
+  AgentRole,
+  PROJECT_ROOT,
+  roleAccessConfig,
+} from "../config/projectConfig";
+import {
+  listFiles,
+  readFileWithRange,
+  searchInFiles,
+  applyPatch,
+} from "../tools/fileTools";
+import { getAstOutline, tsCheck } from "../tools/tsTools";
+import { runTests, runBuild, runLint } from "../tools/execTools";
+import { checkActionAgainstPolicy } from "../tools/policyTools";
+import { RunStepToolUsage } from "../runs/runTypes";
 
-export interface AgentMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+const BLOCKED_SUBSTRINGS = [
+  "/node_modules/",
+  "/dist/",
+  "/build/",
+  "/.next/",
+  "/coverage/",
+  "/.git/",
+  "/migrations/",
+];
+
+function isBlockedPath(p: string): boolean {
+  const norm = p.replace(/\\/g, "/").toLowerCase();
+  return BLOCKED_SUBSTRINGS.some((s) => norm.includes(s));
 }
+
+async function callAzureWithRetry(args: {
+  model: string;
+  messages: any[];
+  tools: any[];
+  maxRetries?: number;
+}): Promise<any> {
+  const { model, messages, tools, maxRetries = 2 } = args;
+
+  let attempt = 0;
+  let delayMs = 1500;
+
+  while (true) {
+    try {
+      return await openaiClient.chat.completions.create({
+        model,
+        messages,
+        tools,
+        tool_choice: "auto",
+      });
+    } catch (err: any) {
+      const status = err?.status;
+      const code = err?.code;
+
+      const isRateLimit =
+        status === 429 ||
+        code === "RateLimitReached" ||
+        code === "rate_limit_exceeded";
+
+      if (!isRateLimit || attempt >= maxRetries) {
+        throw err;
+      }
+
+      attempt += 1;
+
+      // Käytetään joko retry-afteria tai kevyttä backoffia
+      let retryAfterMs = delayMs;
+      const ra =
+        err?.headers?.get?.("retry-after") ?? err?.headers?.["retry-after"];
+      if (ra) {
+        const seconds = Number(ra);
+        if (!Number.isNaN(seconds) && seconds > 0) {
+          retryAfterMs = seconds * 1000;
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+      delayMs *= 2;
+    }
+  }
+}
+
+export interface RunAgentParams {
+  role: AgentRole;
+  systemPrompt: string;
+  userMessage: string;
+  projectRoot?: string;
+}
+
+export interface RunAgentResult {
+  reply: string;
+  usedTools: RunStepToolUsage[];
+}
+
+// Kansioita, joita EI haluta listata/tonkia
+const DEFAULT_IGNORE_PATTERNS = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/.next/**",
+  "**/coverage/**",
+  "**/.git/**",
+  "**/migrations/**",
+  "**/prisma/migrations/**",
+];
+
 
 const tools: any[] = [
   {
     type: "function",
     function: {
       name: "read_file",
-      description: "Lue tiedoston sisältö suhteellisella polulla projektin juuresta.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description:
-              "Tiedoston suhteellinen polku projektin juuresta, esim. src/components/MovieCard.tsx"
-          }
-        },
-        required: ["path"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "write_file",
       description:
-        "Kirjoita tai korvaa tiedosto suhteellisella polulla projektin juuresta. Käytä tätä vain kun käyttäjä pyytää nimenomaan muutosta.",
+        "Lue tiedoston sisältö suhteellisella polulla projektin juuresta (valinnainen rivialue).",
       parameters: {
         type: "object",
         properties: {
-          path: {
-            type: "string",
-            description:
-              "Tiedoston suhteellinen polku projektin juuresta, esim. src/components/MovieCard.tsx"
-          },
-          content: {
-            type: "string",
-            description: "Kirjoitettava sisältö kokonaan."
-          }
+          path: { type: "string" },
+          fromLine: { type: "integer", minimum: 1 },
+          toLine: { type: "integer", minimum: 1 },
+          maxBytes: { type: "integer", minimum: 1 },
         },
-        required: ["path", "content"]
-      }
-    }
+        required: ["path"],
+      },
+    },
   },
   {
     type: "function",
     function: {
       name: "list_files",
       description:
-        "List files and directories inside a given directory path within the project.",
+        "Listaa tiedostot glob-patternien perusteella projektin juuren alta.",
       parameters: {
         type: "object",
         properties: {
-          dir: { type: "string", description: "Directory path, e.g. 'src/'" },
+          patterns: {
+            type: "array",
+            items: { type: "string" },
+          },
+          ignore: {
+            type: "array",
+            items: { type: "string" },
+          },
         },
-        required: ["dir"],
+        required: ["patterns"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_in_files",
+      description:
+        "Tekstipohainen haku tiedostoista glob-patternien avulla.",
+      parameters: {
+        type: "object",
+        properties: {
+          patterns: {
+            type: "array",
+            items: { type: "string" },
+          },
+          query: { type: "string" },
+          isRegex: { type: "boolean" },
+          ignore: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["patterns", "query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_patch",
+      description:
+        "Sovella unified diff -patch yhteen tiedostoon. Käytä vain kun olet varma muutoksesta.",
+      parameters: {
+        type: "object",
+        properties: {
+          filePath: { type: "string" },
+          originalHash: { type: "string" },
+          patch: { type: "string" },
+          estimatedChangedLines: { type: "integer", minimum: 0 },
+          dryRun: { type: "boolean" },
+        },
+        required: ["filePath", "originalHash", "patch"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ts_get_outline",
+      description:
+        "Palauta TypeScript-tiedoston outline: funktiot, luokat, tyypit, interface:t jne.",
+      parameters: {
+        type: "object",
+        properties: {
+          filePath: { type: "string" },
+        },
+        required: ["filePath"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ts_check",
+      description:
+        "Aja TypeScript-tyypitystarkistus koko projektille tsconfigin perusteella.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_tests",
+      description: "Aja testit (npm test).",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_build",
+      description: "Aja build (npm run build).",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_lint",
+      description: "Aja lint (npm run lint).",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
   },
 ];
 
-export async function runAgent(messages: AgentMessage[]): Promise<string> {
+interface PolicyConfig {
+  projectRoot: string;
+  allowedPaths: string[];
+  readOnlyPaths: string[];
+  maxFilesChanged: number;
+  maxTotalChangedLines: number;
+}
 
-  const role: AgentRole = "coder";
+function buildPolicy(role: AgentRole, projectRoot: string): PolicyConfig {
+  const rules = roleAccessConfig[role];
 
-  const openaiMessages: any[] = messages.map((m) => ({
-    role: m.role,
-    content: m.content
-  }));
+  return {
+    projectRoot,
+    allowedPaths: rules.allowedPaths,
+    // lisätään raskaat kansiot aina read-onlyksi
+    readOnlyPaths: [
+      ...rules.readOnlyPaths,
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/coverage/**",
+      "**/.git/**",
+    ],
+    maxFilesChanged: 10,
+    maxTotalChangedLines: 500,
+  };
+}
 
-  // max 3 tool-kierrosta
-  for (let i = 0; i < 3; i++) {
-    const response = await openaiClient.chat.completions.create({
+export async function runAgent(
+  params: RunAgentParams
+): Promise<RunAgentResult> {
+  const { role, systemPrompt, userMessage, projectRoot } = params;
+
+  const root = projectRoot ?? PROJECT_ROOT;
+
+  const messages: any[] = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ];
+
+  const usedTools: RunStepToolUsage[] = [];
+  const policy = buildPolicy(role, root);
+
+  for (let round = 0; round < 2; round++) {
+    const completion = await callAzureWithRetry({
       model: azureConfig.deployment,
-      messages: openaiMessages,
+      messages,
       tools,
-      tool_choice: "auto"
     });
 
-    const choice = response.choices[0];
-    if (!choice) {
-      throw new Error("Azure OpenAI ei palauttanut valintoja.");
-    }
-
+    const choice = completion.choices[0];
     const msg: any = choice.message;
+    const toolCalls = msg.tool_calls;
 
-    // TOOL CALLIT
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      // assistant-viesti, jossa tool_calls
-      openaiMessages.push({
+    if (toolCalls && toolCalls.length > 0) {
+      messages.push({
         role: "assistant",
-        content: msg.content ?? "",
-        tool_calls: msg.tool_calls
+        content: msg.content ?? null,
+        tool_calls: toolCalls.map((tc: any) => ({
+          id: tc.id,
+          type: "function",
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          },
+        })),
       });
 
-      // suoritetaan jokainen tool call
-      for (const toolCallAny of msg.tool_calls as any[]) {
-        const fn = toolCallAny.function as { name: string; arguments: string };
-        const toolName = fn.name;
-        const rawArgs = fn.arguments || "{}";
-
+      for (const toolCall of toolCalls) {
+        const toolName = toolCall.function.name;
         let parsedArgs: any;
         try {
-          parsedArgs = JSON.parse(rawArgs);
+          parsedArgs = toolCall.function.arguments
+            ? JSON.parse(toolCall.function.arguments)
+            : {};
         } catch {
           parsedArgs = {};
         }
 
-        let toolResult: string;
+        let toolResult: any = null;
 
         try {
           if (toolName === "read_file") {
-            if (!parsedArgs.path || typeof parsedArgs.path !== "string") {
-              throw new Error("read_file: path puuttuu tai ei ole string.");
-            }
-            const content = await readFileSafe(role, parsedArgs.path);
-            toolResult = content;
-          } else if (toolName === "write_file") {
-            if (!parsedArgs.path || typeof parsedArgs.path !== "string") {
-              throw new Error("write_file: path puuttuu tai ei ole string.");
-            }
-            if (typeof parsedArgs.content !== "string") {
-              throw new Error("write_file: content täytyy olla string.");
-            }
-            await writeFileSafe(role, parsedArgs.path, parsedArgs.content);
-            toolResult = `Tiedosto '${parsedArgs.path}' kirjoitettu onnistuneesti.`;
-          } else if (toolName === "list_files") {
-            if (!parsedArgs.dir || typeof parsedArgs.dir !== "string") {
-              throw new Error("list_files: dir puuttuu tai ei ole string.");
-            }
-            const entries = await listDirSafe(role, parsedArgs.dir);
-            toolResult = JSON.stringify(entries);
-          } else {
-            toolResult = `Tuntematon työkalu: ${toolName}`;
-          }
+            const abs = path.join(root, parsedArgs.path);
 
+            if (isBlockedPath(abs)) {
+              toolResult = {
+                ok: false,
+                error: "Reading from this directory is blocked by policy (node_modules/dist/migrations/etc).",
+              };
+            } else {
+              toolResult = await readFileWithRange(abs, {
+                fromLine: parsedArgs.fromLine,
+                toLine: parsedArgs.toLine,
+                maxBytes: parsedArgs.maxBytes,
+              });
+            }
+          }
+          else if (toolName === "list_files") {
+            const rawPatterns = parsedArgs.patterns as string[] | undefined;
+            let patterns: string[];
+
+            // jos mallilta ei tule mitään järkevää, käytetään "**/*"
+            if (!Array.isArray(rawPatterns) || rawPatterns.length === 0) {
+              patterns = ["**/*"];
+            } else {
+              patterns = rawPatterns;
+            }
+
+            const ignorePatterns = [
+              ...DEFAULT_IGNORE_PATTERNS,
+              ...(parsedArgs.ignore || []),
+            ];
+
+            let res = await listFiles({
+              cwd: root,
+              patterns,
+              ignore: ignorePatterns,
+            });
+
+            // suojataan tokenkulutusta
+            toolResult = Array.isArray(res) ? res.slice(0, 300) : res;
+          } else if (toolName === "search_in_files") {
+            const ignorePatterns = [
+              ...DEFAULT_IGNORE_PATTERNS,
+              ...(parsedArgs.ignore || []),
+            ];
+
+            toolResult = await searchInFiles({
+              cwd: root,
+              patterns: parsedArgs.patterns,
+              query: parsedArgs.query,
+              isRegex: parsedArgs.isRegex,
+              ignore: ignorePatterns,
+            });
+          }
+          else if (toolName === "apply_patch") {
+            const abs = path.join(root, parsedArgs.filePath);
+            const policyResult = checkActionAgainstPolicy(
+              {
+                kind: "applyPatch",
+                targetPaths: [abs],
+                estimatedChangedLines: parsedArgs.estimatedChangedLines,
+                description: "LLM-driven patch",
+              },
+              policy
+            );
+            if (!policyResult.allowed) {
+              toolResult = {
+                ok: false,
+                error: "Policy violation",
+                details: policyResult,
+              };
+            } else {
+              const res = await applyPatch({
+                filePath: abs,
+                originalHash: parsedArgs.originalHash,
+                patch: parsedArgs.patch,
+                dryRun: parsedArgs.dryRun,
+              });
+              toolResult = { ok: true, result: res };
+            }
+          } else if (toolName === "ts_get_outline") {
+            const abs = path.join(root, parsedArgs.filePath);
+            toolResult = await getAstOutline(abs, {
+              projectRoot: root,
+            });
+          } else if (toolName === "ts_check") {
+            toolResult = await tsCheck({ projectRoot: root });
+          } else if (toolName === "run_tests") {
+            toolResult = await runTests(root);
+          } else if (toolName === "run_build") {
+            toolResult = await runBuild(root);
+          } else if (toolName === "run_lint") {
+            toolResult = await runLint(root);
+          } else {
+            toolResult = { error: `Unknown tool: ${toolName}` };
+          }
         } catch (err: any) {
-          toolResult = `Työkalun ${toolName} suoritus epäonnistui: ${err.message ?? String(err)}`;
+          toolResult = {
+            ok: false,
+            error: err?.message ?? String(err),
+          };
         }
 
-        // tool-vastaus takaisin mallille
-        openaiMessages.push({
+        usedTools.push({
+          name: toolName,
+          args: parsedArgs,
+        });
+
+        messages.push({
           role: "tool",
-          tool_call_id: toolCallAny.id,
-          content: toolResult
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(toolResult),
         });
       }
 
-      // uusi kierros, nyt malli näkee toolien tulokset
       continue;
     }
 
-    // Ei tool-calleja → lopullinen vastaus
-    if (!msg.content) {
+    const content = msg.content;
+    if (!content) {
       throw new Error("Azure OpenAI ei palauttanut sisältöä.");
     }
 
-    return msg.content as string;
+    messages.push({
+      role: "assistant",
+      content,
+    });
+
+    return { reply: content as string, usedTools };
   }
 
-  throw new Error("Tool calling -loopin maksimimäärä (3) ylittyi.");
+  throw new Error("Tool-calling -loopin maksimimäärä (2) ylittyi.");
 }

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { runAgent, AgentMessage } from "../agent/agentService";
+import { runAgent } from "../agent/agentService";
 import { AgentRole } from "../config/projectConfig";
 import { createRun, addRunStep, getRunSteps } from "../runs/runStore";
 
@@ -14,60 +14,74 @@ function parseRole(raw: unknown): AgentRole {
   return "coder";
 }
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/agent", async (req: Request, res: Response) => {
   try {
-    const { message, role, runId } = req.body as {
-      message?: string;
-      role?: AgentRole;
-      runId?: string;
-    };
-
+    const { message, role, projectRoot } = req.body ?? {};
     if (!message || typeof message !== "string") {
-      return res.status(400).json({ error: "message puuttuu tai ei ole string" });
+      return res.status(400).json({ error: "message puuttuu" });
     }
 
     const effectiveRole = parseRole(role);
-    let currentRunId = runId;
+    const effectiveProjectRoot =
+      typeof projectRoot === "string" && projectRoot.trim().length > 0
+        ? projectRoot.trim()
+        : undefined;
 
-    // luodaan uusi run jos ei annettu
-    if (!currentRunId) {
-      const run = await createRun(effectiveRole);
-      currentRunId = run.id;
-    }
+    const systemPrompt = `Olet Samulin agenttialustan rooli "${effectiveRole}".
+Sinulla on käytössäsi työkaluja koodin tutkimiseen, analysointiin ja refaktorointiin
+kohdeprojektissa. Keskity aina lähdekoodikansioihin (esim. src, app, lib) ja
+vältä node_modules-, dist-, build-, .next-, coverage- ja .git-kansioita.
+Tee pieniä, hyvin perusteltuja muutoksia ja selitä aina, mitä teet.`;
 
-    // haetaan aiemmat stepit ja rakennetaan konteksti
-    const previousSteps = await getRunSteps(currentRunId);
+    const run = await createRun(effectiveRole, effectiveProjectRoot);
 
-    const messages: AgentMessage[] = [
-      {
-        role: "system",
-        content:
-          "Olet Samulin apuagentti. Vastaat lyhyesti, suoraan ja teknisesti. " +
-          "Jos käytät tiedostoja tai työkaluja, kerro se selkeästi luonnollisella kielellä."
-      },
-    ];
+    const { reply, usedTools } = await runAgent({
+      role: effectiveRole,
+      systemPrompt,
+      userMessage: message,
+      projectRoot: effectiveProjectRoot,
+    });
 
-    for (const step of previousSteps) {
-      messages.push({ role: "user", content: step.inputMessage });
-      messages.push({ role: "assistant", content: step.outputMessage });
-    }
-
-    messages.push({ role: "user", content: message });
-
-    const reply = await runAgent(messages);
-
-    // toistaiseksi usedTools tyhjä; liitetään myöhemmin agentServiceen
     await addRunStep({
-      runId: currentRunId,
+      runId: run.id,
+      index: 0,
       agentRole: effectiveRole,
       inputMessage: message,
       outputMessage: reply,
-      usedTools: [],
+      usedTools,
     });
 
-    res.json({ reply, runId: currentRunId });
+    res.json({ reply, runId: run.id });
   } catch (err: any) {
     console.error("Agent error:", err);
+
+    const status = err?.status;
+    const code = err?.code;
+
+    const isRateLimit =
+      status === 429 || code === "RateLimitReached" || code === "rate_limit_exceeded";
+
+    if (isRateLimit) {
+      const retryAfter = err?.headers?.get?.("retry-after") ?? err?.headers?.["retry-after"];
+      return res.status(429).json({
+        error: "rate_limit",
+        message:
+          "Azure OpenAI -palvelun token-raja ylittyi tälle mallille. Odota hetki ja yritä uudelleen.",
+        retryAfter,
+      });
+    }
+
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// pieni debug-endpoint, ei pakollinen mutta hyödyllinen
+router.get("/runs/:runId/steps", async (req: Request, res: Response) => {
+  try {
+    const steps = await getRunSteps(req.params.runId);
+    res.json({ steps });
+  } catch (err: any) {
+    console.error("getRunSteps error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

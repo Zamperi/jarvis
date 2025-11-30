@@ -1,203 +1,243 @@
 // src/tools/fileTools.ts
 import fs from "fs/promises";
 import path from "path";
-import { fileAccessConfig, roleFilePolicies, AgentRole } from "../config/projectConfig";
+import crypto from "crypto";
+import fg from "fast-glob";
+import { applyPatch as applyTextPatch } from "diff";
 
-const AUDIT_LOG_PATH = path.resolve(fileAccessConfig.rootDir, "agent-audit.log");
-
-function normalizeRelativePath(relativePath: string): string {
-  // poistetaan johtava "/" jos sellainen tulee LLM:ltä
-  return relativePath.replace(/^[/\\]+/, "");
+export interface FileRangeOptions {
+  fromLine?: number;
+  toLine?: number;
+  maxBytes?: number;
 }
 
-function resolveProjectPath(relativePath: string): string {
-  const root = fileAccessConfig.rootDir;
-  const normalized = normalizeRelativePath(relativePath);
-  const fullPath = path.resolve(root, normalized);
-
-  const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
-  if (!fullPath.startsWith(normalizedRoot)) {
-    throw new Error(
-      `Path outside project root blocked: ${relativePath} -> ${fullPath}`
-    );
-  }
-
-  return fullPath;
+export interface ReadFileResult {
+  path: string;
+  content: string;
+  fromLine: number;
+  toLine: number;
+  totalLines: number;
+  hash: string;
 }
 
-function checkFilePolicy(role: AgentRole, op: "read" | "write", relativePath: string) {
-  const normalized = normalizeRelativePath(relativePath);
-  const policy = roleFilePolicies[role];
-
-  // Jos roolille ei ole määritelty polkuja → ei pääsyä mihinkään
-  if (!policy) {
-    throw new Error(`No file policy defined for role: ${role}`);
-  }
-
-  // allowedPaths: ainakin yhden pitää täsmätä prefixiksi
-  const isAllowed = policy.allowedPaths.length === 0
-    ? false
-    : policy.allowedPaths.some((prefix) =>
-      normalized === prefix || normalized.startsWith(prefix)
-    );
-
-  if (!isAllowed) {
-    throw new Error(
-      `Policy violation: role "${role}" not allowed to ${op} "${normalized}"`
-    );
-  }
-
-  // readOnlyPaths: jos osuu ja op = write → estetään
-  if (
-    op === "write" &&
-    policy.readOnlyPaths.some(
-      (prefix) => normalized === prefix || normalized.startsWith(prefix)
-    )
-  ) {
-    throw new Error(
-      `Policy violation: role "${role}" cannot write to read-only path "${normalized}"`
-    );
-  }
+export interface ListFilesOptions {
+  cwd: string;
+  patterns: string[];
+  ignore?: string[];
 }
 
-async function appendAuditLog(entry: {
-  role: AgentRole;
-  op: "read" | "write";
-  relativePath: string;
-  absolutePath?: string;
-  ok: boolean;
-  error?: string;
-}) {
-  const line =
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      ...entry,
-    }) + "\n";
-
-  try {
-    await fs.appendFile(AUDIT_LOG_PATH, line, {
-      encoding: "utf8",
-      flag: "a",
-    });
-  } catch (err) {
-    console.error("Failed to write audit log:", err);
-  }
+export interface SearchMatch {
+  file: string;
+  line: number;
+  column: number;
+  excerpt: string;
 }
 
-export async function readFileSafe(
-  role: AgentRole,
-  relativePath: string
-): Promise<string> {
-  let abs: string | undefined;
-  const normalized = normalizeRelativePath(relativePath);
-
-  try {
-    checkFilePolicy(role, "read", normalized);
-    abs = resolveProjectPath(normalized);
-
-    const content = await fs.readFile(abs, "utf8");
-
-    await appendAuditLog({
-      role,
-      op: "read",
-      relativePath: normalized,
-      absolutePath: abs,
-      ok: true,
-    });
-
-    return content;
-  } catch (err: any) {
-    await appendAuditLog({
-      role,
-      op: "read",
-      relativePath: normalized,
-      absolutePath: abs,
-      ok: false,
-      error: err?.message ?? String(err),
-    });
-    throw err;
-  }
+export interface SearchOptions {
+  cwd: string;
+  patterns: string[];
+  query: string;
+  isRegex?: boolean;
+  ignore?: string[];
+  maxResultsPerFile?: number;
 }
 
-export async function writeFileSafe(
-  role: AgentRole,
-  relativePath: string,
+export interface ApplyPatchInput {
+  filePath: string;
+  originalHash: string;
+  patch: string; // unified diff
+  dryRun?: boolean;
+}
+
+export interface ApplyPatchResult {
+  filePath: string;
+  changed: boolean;
+  newHash?: string;
+  preview?: string;
+}
+
+/**
+ * Laskee sha256-hashin annetusta sisällöstä.
+ */
+export function sha256(content: string | Buffer): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Listaa tiedostot glob-patternien perusteella.
+ */
+export async function listFiles(
+  options: ListFilesOptions
+): Promise<string[]> {
+  const { cwd, patterns, ignore } = options;
+
+  const entries = await fg(patterns, {
+    cwd,
+    ignore,
+    dot: false,
+    onlyFiles: true,
+    followSymbolicLinks: false,
+  });
+
+  return entries.map((p) => path.resolve(cwd, p));
+}
+
+/**
+ * Lukee tiedoston, tukee rivialuetta ja maxBytes-rajausta.
+ */
+export async function readFileWithRange(
+  filePath: string,
+  options: FileRangeOptions = {}
+): Promise<ReadFileResult> {
+  const absPath = path.resolve(filePath);
+  const raw = await fs.readFile(absPath, "utf8");
+
+  let content = raw;
+  let fromLine = options.fromLine ?? 1;
+  let toLine = options.toLine ?? Number.MAX_SAFE_INTEGER;
+
+  const lines = raw.split(/\r?\n/);
+  const totalLines = lines.length;
+
+  fromLine = Math.max(1, Math.min(fromLine, totalLines));
+  toLine = Math.max(fromLine, Math.min(toLine, totalLines));
+
+  content = lines.slice(fromLine - 1, toLine).join("\n");
+
+  if (options.maxBytes && Buffer.byteLength(content, "utf8") > options.maxBytes) {
+    let buf = Buffer.from(content, "utf8");
+    buf = buf.subarray(0, options.maxBytes);
+    content = buf.toString("utf8");
+  }
+
+  return {
+    path: absPath,
+    content,
+    fromLine,
+    toLine,
+    totalLines,
+    hash: sha256(raw),
+  };
+}
+
+/**
+ * Kirjoittaa sisällön tiedostoon (overwrites).
+ */
+export async function writeFileRaw(
+  filePath: string,
   content: string
-): Promise<void> {
-  let abs: string | undefined;
-  const normalized = normalizeRelativePath(relativePath);
-
-  try {
-    checkFilePolicy(role, "write", normalized);
-    abs = resolveProjectPath(normalized);
-
-    await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, content, "utf8");
-
-    await appendAuditLog({
-      role,
-      op: "write",
-      relativePath: normalized,
-      absolutePath: abs,
-      ok: true,
-    });
-  } catch (err: any) {
-    await appendAuditLog({
-      role,
-      op: "write",
-      relativePath: normalized,
-      absolutePath: abs,
-      ok: false,
-      error: err?.message ?? String(err),
-    });
-    throw err;
-  }
+): Promise<string> {
+  const absPath = path.resolve(filePath);
+  await fs.mkdir(path.dirname(absPath), { recursive: true });
+  await fs.writeFile(absPath, content, "utf8");
+  return absPath;
 }
 
-export interface SafeDirEntry {
-  name: string;
-  kind: "file" | "dir";
+/**
+ * Tekstihaku tiedostoista.
+ */
+export async function searchInFiles(
+  options: SearchOptions
+): Promise<SearchMatch[]> {
+  const {
+    cwd,
+    patterns,
+    query,
+    isRegex = false,
+    ignore,
+    maxResultsPerFile = 20,
+  } = options;
+
+  const files = await listFiles({ cwd, patterns, ignore });
+  const matches: SearchMatch[] = [];
+
+  const regex = isRegex ? new RegExp(query, "g") : null;
+
+  for (const file of files) {
+    const content = await fs.readFile(file, "utf8");
+    const lines = content.split(/\r?\n/);
+    let countForFile = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (countForFile >= maxResultsPerFile) break;
+
+      const line = lines[i];
+      let idx = -1;
+
+      if (regex) {
+        const m = line.match(regex);
+        if (!m) continue;
+        idx = line.search(regex);
+      } else {
+        idx = line.indexOf(query);
+        if (idx === -1) continue;
+      }
+
+      const start = Math.max(0, idx - 40);
+      const end = Math.min(line.length, idx + query.length + 40);
+      const excerpt = line.slice(start, end);
+
+      matches.push({
+        file,
+        line: i + 1,
+        column: idx + 1,
+        excerpt,
+      });
+
+      countForFile++;
+    }
+  }
+
+  return matches;
 }
 
-export async function listDirSafe(
-  role: AgentRole,
-  dirPath: string
-): Promise<SafeDirEntry[]> {
-  const normalized = normalizeRelativePath(
-    dirPath.endsWith("/") ? dirPath : dirPath + "/"
-  );
+/**
+ * Soveltaa unified diff -patchin yhteen tiedostoon.
+ */
+export async function applyPatch(
+  input: ApplyPatchInput
+): Promise<ApplyPatchResult> {
+  const { filePath, originalHash, patch, dryRun } = input;
+  const absPath = path.resolve(filePath);
 
-  // kohdellaan katalogia "read"-oikeutena
-  checkFilePolicy(role, "read", normalized);
-  const absDir = resolveProjectPath(normalized);
-
-  let entries: SafeDirEntry[] = [];
-
+  let current = "";
   try {
-    const dirEntries = await fs.readdir(absDir, { withFileTypes: true });
-    entries = dirEntries.map((e) => ({
-      name: e.name,
-      kind: e.isDirectory() ? "dir" : "file",
-    }));
-
-    await appendAuditLog({
-      role,
-      op: "read",
-      relativePath: normalized,
-      absolutePath: absDir,
-      ok: true,
-    });
-
-    return entries;
+    current = await fs.readFile(absPath, "utf8");
   } catch (err: any) {
-    await appendAuditLog({
-      role,
-      op: "read",
-      relativePath: normalized,
-      absolutePath: absDir,
-      ok: false,
-      error: err?.message ?? String(err),
-    });
+    if (err?.code === "ENOENT") {
+      throw new Error(`File not found: ${absPath}`);
+    }
     throw err;
   }
+
+  const currentHash = sha256(current);
+  if (currentHash !== originalHash) {
+    throw new Error(
+      `Hash mismatch for ${absPath}. File has changed since it was read.`
+    );
+  }
+
+  const patched = applyTextPatch(current, patch);
+  if (patched === false) {
+    throw new Error(`Failed to apply patch to ${absPath}`);
+  }
+
+  if (dryRun) {
+    return {
+      filePath: absPath,
+      changed: patched !== current,
+      preview: patched,
+      newHash: sha256(patched),
+    };
+  }
+
+  if (patched !== current) {
+    await fs.writeFile(absPath, patched, "utf8");
+  }
+
+  return {
+    filePath: absPath,
+    changed: patched !== current,
+    newHash: sha256(patched),
+  };
 }

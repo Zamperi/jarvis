@@ -13,7 +13,8 @@ app.get("/", (_req, res) => {
   res.send("Samuli Agent backend on käynnissä.");
 });
 
-app.use("/agent", agentRouter);
+// HUOM: ei prefixiä → agentRoutes määrittelee /agent itse
+app.use(agentRouter);
 
 app.listen(port, () => {
   console.log(`Server käynnissä http://localhost:${port}`);
