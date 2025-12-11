@@ -1,0 +1,35 @@
+{
+  "name": "samuli-agent",
+  "displayName": "Samuli Agent",
+  "description": "Yhdistää Samulin agenttialustan VS Codeen.",
+  "version": "0.0.1",
+  "publisher": "samuli",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:samuliAgent.ask"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "samuliAgent.ask",
+        "title": "Samuli Agent: Ask about current file"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}

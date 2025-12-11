@@ -2,50 +2,78 @@
 import path from "path";
 
 export const PROJECT_ROOT = path.resolve(
-    process.env.AGENT_PROJECT_ROOT ?? process.cwd()
+  process.env.AGENT_PROJECT_ROOT ?? process.cwd()
 );
 
-export type AgentRole =
-    | "planner"
-    | "coder"
-    | "tester"
-    | "critic"
-    | "documenter";
+// Voit lisätä rooleja myöhemmin, nyt pidetään nämä selkeinä.
+export type AgentRole = "coder" | "documenter";
 
 export interface FileAccessConfig {
-    rootDir: string;
+  rootDir: string;
 }
 
+// Yksinkertainen juurikonfigi, jos jossain tätä käytetään
 export const fileAccessConfig: FileAccessConfig = {
-    rootDir: PROJECT_ROOT,
+  rootDir: PROJECT_ROOT,
 };
 
 export interface RoleAccessRule {
-    allowedPaths: string[];
-    readOnlyPaths: string[];
+  /**
+   * Glob-kuviot, joihin rooli SAA kohdistaa operaatioita (luku ja/tai kirjoitus).
+   * esim. "src/**", "docs/**", "README.md", "*.md"
+   */
+  allowedPaths: string[];
+  /**
+   * Glob-kuviot, jotka ovat TÄMÄLLE roolille read-only.
+   * Jos polku täsmää sekä allowedPaths että readOnlyPaths → vain luku, ei kirjoitusta.
+   */
+  readOnlyPaths: string[];
 }
 
+/**
+ * Tärkein pointti:
+ * - coder saa muokata koodia + docs + README
+ * - documenter saa lukea koodia, mutta muokata vain README + docs
+ */
 export const roleAccessConfig: Record<AgentRole, RoleAccessRule> = {
-    planner: {
-        // suunnittelu: saa katsella lähes kaikkea, mutta ei kirjoita
-        allowedPaths: ["src/", "tests/", "docs/"],
-        readOnlyPaths: ["src/", "tests/", "docs/"],
-    },
-    coder: {
-        // varsinainen koodariagentti
-        allowedPaths: ["src/", "tests/", "docs/"],
-        readOnlyPaths: ["docs/"],
-    },
-    tester: {
-        allowedPaths: ["src/", "tests/"],
-        readOnlyPaths: ["src/", "tests/"], // lukee ja ajaa testejä, ei muuta koodia
-    },
-    critic: {
-        allowedPaths: ["src/", "tests/"],
-        readOnlyPaths: ["src/", "tests/"],
-    },
-    documenter: {
-        allowedPaths: ["src/", "docs/"],
-        readOnlyPaths: ["src/"], // saa muokata docsia, ei koodia
-    },
+  coder: {
+    allowedPaths: [
+      "**/src/**",
+      "**/tests/**",
+      "**/docs/**",
+      "**/README.md",
+      "**/*.md",      // muut juuren md-tiedostot
+    ],
+    readOnlyPaths: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/coverage/**",
+      "**/.git/**",
+      "**/migrations/**",
+      "**/prisma/migrations/**",
+      // HUOM: EI src/** eikä docs/** eikä README.md → coder saa muokata niitä
+    ],
+  },
+
+  documenter: {
+    allowedPaths: [
+      "**/src/**",        // saa lukea koodia
+      "**/docs/**",       // saa luoda/muokata dokkareita
+      "**/README.md",     // saa luoda/muokata juuren README:tä
+      "**/*.md",          // muut juuren md-tiedostot
+    ],
+    readOnlyPaths: [
+      "**/src/**",        // koodi vain luettavaksi
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/coverage/**",
+      "**/.git/**",
+      "**/migrations/**",
+      "**/prisma/migrations/**",
+    ],
+  },
 };
