@@ -7,7 +7,13 @@ export interface Run {
   createdAt: string;
   role: AgentRole;
   status: RunStatus;
-  projectRoot?: string; // mihin projektiin tämä ajo liittyi
+  projectRoot?: string; // mihin projektiin ajo liittyi
+  // Halutessa tänne voi myöhemmin lisätä aggregoidut kustannukset
+  // totalPromptTokens?: number;
+  // totalCompletionTokens?: number;
+  // totalTokens?: number;
+  // totalCostUSD?: number;
+  // totalCostEUR?: number;
 }
 
 export interface RunStepToolUsage {
@@ -24,4 +30,11 @@ export interface RunStep {
   outputMessage: string;
   usedTools: RunStepToolUsage[];
   createdAt: string;
+
+  // token- ja kustannusmetriikka per step (valinnaisia vanhojen rivien takia)
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUSD?: number;
+  costEUR?: number;
 }

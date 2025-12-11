@@ -1,0 +1,44 @@
+# Node & React yhteiset
+node_modules/
+dist/
+build/
+
+# Lokit
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Env-tiedostot (älä koskaan puske salasanoja)
+.env
+.env.local
+.env.*.local
+/server/.env
+
+# Editorien & OS:n roskat
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Testikattavuus & välimuisti
+coverage/
+.cache/
+.tmp/
+.out/
+
+# Backend (Express)
+server/node_modules/
+server/dist/
+server/build/
+
+# Frontend (React)
+client/node_modules/
+client/dist/
+client/build/
+client/.vite/
+
+# Misc
+*.lock
