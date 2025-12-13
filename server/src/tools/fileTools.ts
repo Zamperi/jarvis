@@ -88,8 +88,10 @@ export async function listFiles(
     followSymbolicLinks: false,
   });
 
-  return entries.map((p) => path.resolve(cwd, p));
+  // Palauta relatiiviset polut (ja normalisoi forward slasheiksi)
+  return entries.map((p) => p.split(path.sep).join("/"));
 }
+
 
 /**
  * Lukee tiedoston sisällön ja palauttaa mahdollisesti rajatun alueen.
