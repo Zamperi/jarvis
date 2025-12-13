@@ -1,0 +1,11 @@
+{
+  "watch": ["src"],
+  "ext": "ts,js,json",
+  "ignore": [
+    "docs/**",
+    "dist/**",
+    "src/agent/**",
+    "src/tools/**",
+    "src/runs/**"
+  ]
+}

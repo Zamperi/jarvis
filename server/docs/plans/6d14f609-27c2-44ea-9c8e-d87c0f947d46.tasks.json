@@ -1,0 +1,32 @@
+{
+  "runId": "6d14f609-27c2-44ea-9c8e-d87c0f947d46",
+  "taskPath": "docs/tasks/test-task.md",
+  "role": "coder",
+  "status": "draft",
+  "projectRoot": "C:/codes/agent/server",
+  "createdAt": "2025-12-13T17:36:02.855Z",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Create hello.txt file",
+      "status": "PENDING",
+      "files": [
+        "docs/output/hello.txt"
+      ],
+      "description": "Create a new file at `docs/output/hello.txt` with the content \"Hello from execute-mode\".",
+      "attempts": 0,
+      "logs": []
+    },
+    {
+      "id": "T2",
+      "title": "Create summary.md file",
+      "status": "PENDING",
+      "files": [
+        "docs/output/summary.md"
+      ],
+      "description": "Create a new file at `docs/output/summary.md` with a bullet list summarizing the actions taken (creating hello.txt file with specified content).",
+      "attempts": 0,
+      "logs": []
+    }
+  ]
+}
