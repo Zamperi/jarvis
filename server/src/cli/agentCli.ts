@@ -27,6 +27,7 @@ type CostSummary = {
 type TaskPlanResponse = {
   runId: string;
   plan: string;
+  planPath?: string;
   cost?: CostSummary;
   ok?: boolean;
   error?: string;
@@ -268,20 +269,67 @@ async function main() {
       } else {
         try {
           const res = await taskPlan(taskPath);
-          if (res.error) console.log(`Virhe: ${res.error}`);
+
+          if (res.error) {
+            console.log(`Virhe: ${res.error}`);
+            return;
+          }
+
           console.log(`\nRUN ID: ${res.runId}\n`);
-          console.log(res.plan + "\n");
+
+          if (res.planPath) {
+            console.log(`PLAN FILE: ${res.planPath}`);
+            console.log(`Muokkaa tiedostoa ja hyväksy sitten komennolla: /task-approve ${res.runId}\n`);
+          } else {
+            // fallback jos server ei vielä palauta planPathia
+            console.log(res.plan + "\n");
+          }
+
           const costLine = formatCost(res.cost);
           if (costLine) console.log(costLine);
+
         } catch (err: any) {
           const status = err?.response?.status;
           const msg = err?.response?.data?.error ?? err?.message ?? String(err);
+
+          if (status === 429) {
+            // Yritä kaivaa odotusaika viestistä: "Please wait 59 seconds..."
+            const m = String(msg).match(/wait\s+(\d+)\s+seconds?/i);
+            const seconds = m ? Number(m[1]) : 60;
+
+            console.log(`Virhe /task/plan (429): rate limit. Uusi yritys ${seconds}s kuluttua...`);
+
+            await new Promise((r) => setTimeout(r, seconds * 1000));
+
+            // Retry once
+            const res = await taskPlan(taskPath);
+
+            if (res.error) {
+              console.log(`Virhe: ${res.error}`);
+              return;
+            }
+
+            console.log(`\nRUN ID: ${res.runId}\n`);
+            if (res.planPath) {
+              console.log(`PLAN FILE: ${res.planPath}`);
+              console.log(`Muokkaa tiedostoa ja hyväksy sitten komennolla: /task-approve ${res.runId}\n`);
+            } else {
+              console.log(res.plan + "\n");
+            }
+
+            const costLine = formatCost(res.cost);
+            if (costLine) console.log(costLine);
+
+            return;
+          }
+
           console.log(
             status
               ? `Virhe /task/plan (${status}): ${msg}`
               : `Virhe /task/plan: ${msg}`
           );
         }
+
       }
       rl.setPrompt(buildPrompt());
       rl.prompt();
