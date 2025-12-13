@@ -1,34 +1,29 @@
 import readline from "readline";
 import axios from "axios";
 
-const API_URL = "http://localhost:3000/agent";
-
 type AgentRole = "planner" | "coder" | "tester" | "critic" | "documenter";
 
-interface TimeBucketSummary {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  costUSD: number;
-  costEUR: number;
-}
+const ROLES: AgentRole[] = ["planner", "coder", "tester", "critic", "documenter"];
 
-interface CostSummary {
-  byDay: Record<string, TimeBucketSummary>;
-  byWeek: Record<string, TimeBucketSummary>;
-  byMonth: Record<string, TimeBucketSummary>;
-  total: TimeBucketSummary;
-}
+// Serverin base-url. Oletus vastaa sinun server.ts + agentRoutes.ts -mallia: app.use("/agent", router)
+const API_BASE = process.env.AGENT_API_URL ?? "http://localhost:3000/agent";
 
+// Optio: jos serveri vaatii x-api-key
+const API_KEY = process.env.AGENT_API_KEY;
 
-function parseRole(value: string | undefined): AgentRole | null {
-  if (!value) return null;
-  const v = value.toLowerCase();
-  const allowed: AgentRole[] = ["planner", "coder", "tester", "critic", "documenter"];
-  if (allowed.includes(v as AgentRole)) {
-    return v as AgentRole;
-  }
+function asRole(v: string): AgentRole | null {
+  if (ROLES.includes(v as AgentRole)) return v as AgentRole;
   return null;
+}
+
+function formatMoneyEUR(v: number) {
+  return `${v.toFixed(4)} €`;
+}
+function formatMoneyUSD(v: number) {
+  return `${v.toFixed(4)} $`;
+}
+function formatTokens(v: number) {
+  return `${Number(v ?? 0)}`;
 }
 
 // komentoriviltä: --project C:\codes\movieapp
@@ -39,11 +34,48 @@ const cliProjectRoot =
 let currentRole: AgentRole = "coder";
 let currentProjectRoot: string | undefined =
   cliProjectRoot || process.env.AGENT_PROJECT_ROOT || undefined;
-let currentRunId: string | "-" = "-";
 
 function buildPrompt(): string {
   const projLabel = currentProjectRoot ?? "-";
-  return `[${currentRole}][proj:${projLabel}][run:${currentRunId}] > `;
+  return `[${currentRole}][proj:${projLabel}] > `;
+}
+
+function headers() {
+  return API_KEY ? { "x-api-key": API_KEY } : undefined;
+}
+
+async function callAgent(message: string) {
+  const url = `${API_BASE}/${currentRole}`;
+
+  // HUOM: jos sinun agentRoutes.ts odottaa `root`, käytä tätä:
+  const payload: any = { message };
+  if (currentProjectRoot) payload.root = currentProjectRoot;
+
+  // Jos olet vaihtanut agentRoutes.ts lukemaan `projectRoot`, vaihda yllä oleva rivi tähän:
+  // if (currentProjectRoot) payload.projectRoot = currentProjectRoot;
+
+  const resp = await axios.post(url, payload, { headers: headers() });
+  const data = resp.data;
+
+  // Kestää sekä uuden että vanhan response-muodon
+  const ok = data?.ok !== false; // jos serveri ei lähetä ok-kenttää, oletetaan ok
+  const output: string =
+    data?.output ??
+    data?.reply ??
+    data?.result?.output ??
+    "";
+
+  const usage = data?.usage ?? {};
+  const cost = data?.cost ?? {};
+
+  const pt = Number(usage.promptTokens ?? 0);
+  const ct = Number(usage.completionTokens ?? 0);
+  const tt = Number(usage.totalTokens ?? pt + ct);
+
+  const eur = Number(cost.eur ?? 0);
+  const usd = Number(cost.usd ?? 0);
+
+  return { ok, output, pt, ct, tt, eur, usd };
 }
 
 function startCli() {
@@ -52,6 +84,15 @@ function startCli() {
     output: process.stdout,
     prompt: buildPrompt(),
   });
+
+  console.log("Jarvis CLI");
+  console.log("Komennot:");
+  console.log("  /role <planner|coder|tester|critic|documenter>");
+  console.log('  /project <polku>   (esim: /project C:\\codes\\movieapp)');
+  console.log("  exit");
+  console.log("");
+
+  rl.prompt();
 
   rl.on("line", async (line) => {
     const trimmed = line.trim();
@@ -67,12 +108,10 @@ function startCli() {
     }
 
     if (trimmed.startsWith("/role ")) {
-      const parts = trimmed.split(/\s+/);
-      const candidate = parseRole(parts[1]);
+      const v = trimmed.slice("/role ".length).trim();
+      const candidate = asRole(v);
       if (!candidate) {
-        console.log(
-          "Tuntematon rooli. Sallitut: planner, coder, tester, critic, documenter"
-        );
+        console.log("Tuntematon rooli. Sallitut: planner, coder, tester, critic, documenter");
       } else {
         currentRole = candidate;
         console.log(`Rooli vaihdettu: ${currentRole}`);
@@ -94,154 +133,49 @@ function startCli() {
       rl.prompt();
       return;
     }
-    if (trimmed === "/costs") {
-      try {
-        const resp = await axios.get<CostSummary>("http://localhost:3000/costs/summary");
-        const summary: CostSummary = resp.data;
 
-        console.log("\nKUSTANNUSYHTEENVETO");
-        console.log("===================\n");
-
-        const formatMoney = (n: number) => `${n.toFixed(4)} €`;
-        const formatTokens = (n: number) => n.toLocaleString("fi-FI");
-
-        // Päivittäin – näytetään esim. 7 viimeistä
-        const dayEntries = Object.entries(summary.byDay || {}) as [
-          string,
-          TimeBucketSummary
-        ][];
-        const lastDays = dayEntries.slice(-7);
-
-        console.log("PÄIVITTÄIN (viimeiset 7 päivää):");
-        if (lastDays.length === 0) {
-          console.log("  ei dataa\n");
-        } else {
-          for (const [day, agg] of lastDays) {
-            console.log(
-              `  ${day}: ${formatMoney(agg.costEUR)}  (tokens: ${formatTokens(
-                agg.totalTokens
-              )})`
-            );
-          }
-          console.log("");
-        }
-
-        // Viikoittain – näytetään esim. 6 viimeistä
-        const weekEntries = Object.entries(summary.byWeek || {}) as [
-          string,
-          TimeBucketSummary
-        ][];
-        const lastWeeks = weekEntries.slice(-6);
-
-        console.log("VIIKOITTAIN (viimeiset 6 viikkoa):");
-        if (lastWeeks.length === 0) {
-          console.log("  ei dataa\n");
-        } else {
-          for (const [week, agg] of lastWeeks) {
-            console.log(
-              `  ${week}: ${formatMoney(agg.costEUR)}  (tokens: ${formatTokens(
-                agg.totalTokens
-              )})`
-            );
-          }
-          console.log("");
-        }
-
-        // Kuukausittain – näytetään kaikki
-        const monthEntries = Object.entries(summary.byMonth || {}) as [
-          string,
-          TimeBucketSummary
-        ][];
-
-        console.log("KUUKAUSITTAIN:");
-        if (monthEntries.length === 0) {
-          console.log("  ei dataa\n");
-        } else {
-          for (const [month, agg] of monthEntries) {
-            console.log(
-              `  ${month}: ${formatMoney(agg.costEUR)}  (tokens: ${formatTokens(
-                agg.totalTokens
-              )})`
-            );
-          }
-          console.log("");
-        }
-
-        // Kokonaiskuva
-        const total = summary.total;
-        console.log("YHTEENSÄ:");
-        console.log(
-          `  ${formatMoney(total.costEUR)}  (tokens: ${formatTokens(
-            total.totalTokens
-          )})\n`
-        );
-      } catch (err: any) {
-        console.error("Kustannusten haku epäonnistui:", err?.message ?? err);
-      }
-
-      rl.setPrompt(buildPrompt());
-      rl.prompt();
-      return;
-    }
-
-
+    // Varsinainen agenttikutsu
     try {
-      const payload: any = {
-        message: trimmed,
-        role: currentRole,
-      };
-      if (currentProjectRoot) {
-        payload.projectRoot = currentProjectRoot;
+      const res = await callAgent(trimmed);
+
+      if (!res.ok) {
+        console.log("Agentti palautti virheen.");
       }
 
-      const resp = await axios.post(API_URL, payload);
-
-      const reply = resp.data.reply;
-      const runId = resp.data.runId ?? "-";
-      currentRunId = runId;
-
-      const usage = resp.data.usage;
-      const cost = resp.data.cost;
-
-      console.log(`\n[agent/${currentRole}]: ${reply}\n`);
-
-      if (usage && cost) {
-        const pt = usage.promptTokens ?? 0;
-        const ct = usage.completionTokens ?? 0;
-        const tt = usage.totalTokens ?? pt + ct;
-        const usd = cost.usd ?? 0;
-        const eur = cost.eur ?? 0;
-
-        console.log(
-          `Tokens: ${pt} in, ${ct} out (total ${tt})\n` +
-          `Cost (est.): ${eur.toFixed(4)} €  (${usd.toFixed(4)} $)\n`
-        );
+      if (res.output) {
+        console.log("\n" + res.output + "\n");
+      } else {
+        console.log("\n(tyhjä vastaus)\n");
       }
+
+      console.log(
+        `Tokens: ${formatTokens(res.pt)} in, ${formatTokens(res.ct)} out (total ${formatTokens(res.tt)})\n` +
+        `Cost (est.): ${formatMoneyEUR(res.eur)}  (${formatMoneyUSD(res.usd)})\n`
+      );
     } catch (err: any) {
-      if (err?.response?.status === 429 && err?.response?.data?.error === "rate_limit") {
+      const status = err?.response?.status;
+      const msg = err?.response?.data?.error ?? err?.message ?? String(err);
+
+      if (status === 404) {
         console.error(
-          "Azure OpenAI -ratelimit: " + (err.response.data.message ?? "raja ylittyi.")
+          "404: Endpoint ei löytynyt. Varmista että serverissä on reitti POST /agent/:role ja serveri käynnissä."
+        );
+      } else if (status === 401) {
+        console.error(
+          "401: Unauthorized. Jos serveri vaatii avaimen, aseta AGENT_API_KEY ympäristömuuttujaan."
         );
       } else {
-        console.error("Virhe kutsussa:", err?.message ?? err);
+        console.error(`Virhe: ${msg}`);
       }
     }
-
 
     rl.setPrompt(buildPrompt());
     rl.prompt();
   });
 
-  console.log(
-    "Samuli-agentti CLI.\n" +
-    "- /role planner|coder|tester|critic|documenter → vaihda roolia\n" +
-    "- /project C:\\polku\\projektiin → vaihda kohdeprojektia\n" +
-    "-/costs → saa kustannus yhteenveto\n" +
-    "- 'exit' → poistu\n" +
-    "- voit antaa myös --project C:\\polku komentorivillä"
-  );
-
-  rl.prompt();
+  rl.on("close", () => {
+    process.exit(0);
+  });
 }
 
 startCli();

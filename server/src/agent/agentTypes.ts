@@ -1,4 +1,3 @@
-// src/agent/agentTypes.ts
 import { AgentRole } from "../config/projectConfig";
 import { RunStepToolUsage } from "../runs/runTypes";
 
@@ -27,14 +26,18 @@ export interface RunAgentCost {
 }
 
 export interface RunAgentResult {
-  reply: string;
-  usedTools: RunStepToolUsage[];
-  usage: RunAgentUsage;
-  cost: RunAgentCost;
-}
+  // LLM:n lopullinen vastaus
+  output: string;
 
-export interface UsageSnapshot {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
+  // Kuinka monta kierrosta agent looppi teki (hyödyllinen diagnostiikassa)
+  rounds: number;
+
+  // Ajetut työkalut (järjestyksessä)
+  toolUsage: RunStepToolUsage[];
+
+  // Token usage
+  usage: RunAgentUsage;
+
+  // Kustannusarvio
+  cost: RunAgentCost;
 }
