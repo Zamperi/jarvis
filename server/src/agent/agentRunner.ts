@@ -212,6 +212,8 @@ export async function runAgentInternal(
     `[AGENT] mode=${mode} role=${params.role} model=${params.modelId} deployment=${modelProfile.deployment}`
   );
 
+  const maxRounds = mode === "plan" ? 25 : MAX_TOOL_ROUNDS;
+
   // ===========================
   // Anthropic: MINIMI MUUTOS
   // - lisää tools
@@ -234,7 +236,8 @@ export async function runAgentInternal(
         content: [{ type: "text" as const, text: String(m.content ?? "") }],
       }));
 
-    for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+    let lastText = "";
+    for (let round = 1; round <= maxRounds; round++) {
       const resp = await azureAnthropicMessagesCreate({
         model: modelProfile.deployment,
         max_tokens: 1024,
@@ -243,6 +246,8 @@ export async function runAgentInternal(
         tools: claudeTools, // <-- PAKOLLINEN
         temperature: 0,
       });
+
+      lastText = extractClaudeText(resp) || lastText;
 
       totalPromptTokens += resp?.usage?.input_tokens ?? 0;
       totalCompletionTokens += resp?.usage?.output_tokens ?? 0;
@@ -361,9 +366,16 @@ export async function runAgentInternal(
       totalTokens: totalPromptTokens + totalCompletionTokens,
     };
 
-    throw new Error(
-      `Anthropic tool-calling loop exceeded (${MAX_TOOL_ROUNDS}). Usage=${JSON.stringify(usageSummary)}`
-    );
+    return {
+      output:
+        lastText ||
+        `[ERROR] Anthropic tool-calling loop exceeded (${maxRounds}). Usage=${JSON.stringify(usageSummary)}`,
+      rounds: maxRounds,
+      toolUsage,
+      usage: usageSummary,
+      cost: calculateCostFromUsage(usageSummary, params.modelId),
+    };
+
   }
 
   // ===========================
