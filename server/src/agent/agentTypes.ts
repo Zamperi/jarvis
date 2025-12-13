@@ -1,6 +1,8 @@
 import { AgentRole } from "../config/projectConfig";
 import { RunStepToolUsage } from "../runs/runTypes";
 
+export type RunMode = "plan" | "execute";
+
 export interface RunAgentParams {
   role: AgentRole;
   userMessage: string;
@@ -12,6 +14,7 @@ export interface RunAgentInternalParams {
   systemPrompt: string;
   userMessage: string;
   projectRoot?: string;
+  mode?: RunMode; // plan | execute
 }
 
 export interface RunAgentUsage {
@@ -26,18 +29,15 @@ export interface RunAgentCost {
 }
 
 export interface RunAgentResult {
-  // LLM:n lopullinen vastaus
   output: string;
-
-  // Kuinka monta kierrosta agent looppi teki (hyödyllinen diagnostiikassa)
   rounds: number;
-
-  // Ajetut työkalut (järjestyksessä)
   toolUsage: RunStepToolUsage[];
-
-  // Token usage
   usage: RunAgentUsage;
-
-  // Kustannusarvio
   cost: RunAgentCost;
 }
+
+export type UsageSnapshot = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};

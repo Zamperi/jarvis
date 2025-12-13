@@ -1,11 +1,10 @@
+import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import agentRouter from "./routes/agentRoutes";
-import dotenv from "dotenv";
-
-dotenv.config();
+import taskRouter from "./routes/taskRoutes";
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = Number(process.env.PORT) || 3000;
 
 // Suojaa suurilta payloadilta
 app.use(express.json({ limit: "2mb" }));
@@ -26,8 +25,11 @@ if (apiKey) {
   });
 }
 
-// Selkeä prefix → endpointit ovat /agent/:role
+// Agent endpointit: /agent/:role
 app.use("/agent", agentRouter);
+
+// Task-workflow: /task/plan, /task/approve, /task/execute
+app.use("/task", taskRouter);
 
 // Keskitetty virhehandleri (aina JSON)
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
