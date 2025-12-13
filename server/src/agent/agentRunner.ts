@@ -2,7 +2,10 @@ import path from "path";
 import fs from "fs/promises";
 
 import { openaiClient } from "../config/azureOpenAI";
-import { azureAnthropicMessagesCreate, extractClaudeText } from "../config/azureAnthropic";
+import {
+  azureAnthropicMessagesCreate,
+  extractClaudeText,
+} from "../config/azureAnthropic";
 import { PROJECT_ROOT } from "../config/projectConfig";
 import { MODEL_PROFILES } from "../config/modelProfiles";
 
@@ -17,7 +20,11 @@ import {
 
 import { getAstOutline, tsCheck } from "../tools/tsTools";
 import { runTests, runBuild, runLint } from "../tools/execTools";
-import { checkActionAgainstPolicy, PolicyConfig } from "../tools/policyTools";
+import {
+  checkActionAgainstPolicy,
+  PolicyConfig,
+  ActionDescription,
+} from "../tools/policyTools";
 
 import { tools } from "./toolsRegistry";
 import { RunStepToolUsage } from "../runs/runTypes";
@@ -27,9 +34,16 @@ import { RunAgentInternalParams, RunAgentResult, RunMode } from "./agentTypes";
    Turvarajat
 =========================== */
 const MAX_TOOL_ROUNDS = 10;
+const MAX_TOOL_ROUNDS_PLAN = 25;
+const MAX_TOOL_ROUNDS_EXECUTE = 25;
+
 const MAX_TOOL_ARGS_CHARS = 200_000;
 const MAX_WRITE_CHARS = 400_000;
 const MAX_PATCH_CHARS = 400_000;
+
+// Tokenien/viestien paisumisen estot
+const MAX_TOOL_RESULT_CHARS = 20_000;
+const MAX_LIST_FILES = 1500;
 
 const DEFAULT_IGNORE_PATTERNS = [
   "**/node_modules/**",
@@ -42,63 +56,6 @@ const DEFAULT_IGNORE_PATTERNS = [
   "**/coverage/**",
   "**/*.log",
 ];
-
-
-/* ===========================
-   Tool result shaping (token control)
-=========================== */
-const PLAN_MAX_TOOL_RESULT_CHARS = 6_000;
-const EXEC_MAX_TOOL_RESULT_CHARS = 20_000;
-const PLAN_MAX_LIST_FILES = 250;
-const EXEC_MAX_LIST_FILES = 2_000;
-
-function truncateText(s: string, max: number) {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + `\n...[truncated ${s.length - max} chars]`;
-}
-
-function summarizeToolResult(mode: RunMode, toolName: string, toolResult: any) {
-  const maxChars = mode === "plan" ? PLAN_MAX_TOOL_RESULT_CHARS : EXEC_MAX_TOOL_RESULT_CHARS;
-
-  // list_files -> cap list size hard
-  if (toolName === "list_files" && Array.isArray(toolResult)) {
-    const cap = mode === "plan" ? PLAN_MAX_LIST_FILES : EXEC_MAX_LIST_FILES;
-    return {
-      ok: true,
-      count: toolResult.length,
-      sample: toolResult.slice(0, cap),
-      truncated: toolResult.length > cap,
-    };
-  }
-
-  // read_file -> cap content
-  if (toolName === "read_file" && toolResult && typeof toolResult === "object" && typeof toolResult.content === "string") {
-    return {
-      ...toolResult,
-      content: truncateText(toolResult.content, maxChars),
-      truncated: toolResult.content.length > maxChars,
-    };
-  }
-
-  // generic string cap
-  if (typeof toolResult === "string") {
-    return truncateText(toolResult, maxChars);
-  }
-
-  // generic object/array cap by JSON size
-  try {
-    const json = JSON.stringify(toolResult);
-    if (json.length <= maxChars) return toolResult;
-    return {
-      ok: true,
-      truncated: true,
-      note: `Tool result JSON exceeded ${maxChars} chars`,
-      preview: truncateText(json, maxChars),
-    };
-  } catch {
-    return { ok: false, error: "Failed to serialize tool result" };
-  }
-}
 
 /* ===========================
    Usage & Cost
@@ -162,7 +119,8 @@ function isBlockedPath(absPath: string): boolean {
     p.includes("/dist/") ||
     p.includes("/build/") ||
     p.includes("/coverage/")
-  ) return true;
+  )
+    return true;
 
   const base = path.basename(p);
   if (base === ".env" || base.startsWith(".env.")) return true;
@@ -181,8 +139,10 @@ function buildDefaultPolicy(projectRoot: string): PolicyConfig {
 }
 
 function safeJsonParseArgs(raw: unknown): any {
-  if (typeof raw !== "string") throw new Error("Tool arguments must be a JSON string");
-  if (raw.length > MAX_TOOL_ARGS_CHARS) throw new Error("Tool arguments too large");
+  if (typeof raw !== "string")
+    throw new Error("Tool arguments must be a JSON string");
+  if (raw.length > MAX_TOOL_ARGS_CHARS)
+    throw new Error("Tool arguments too large");
   return JSON.parse(raw);
 }
 
@@ -204,6 +164,50 @@ function normalizeSlashes(p: string) {
 
 function toRel(root: string, abs: string) {
   return normalizeSlashes(path.relative(root, abs));
+}
+
+function truncateString(s: string, maxChars: number) {
+  if (s.length <= maxChars) return s;
+  return s.slice(0, maxChars) + `\n...[TRUNCATED ${s.length - maxChars} chars]`;
+}
+
+function safeToolResultForModel(toolName: string, result: any) {
+  // list_files: pidä rakenne, mutta rajaa määrä
+  if (toolName === "list_files" && result?.files && Array.isArray(result.files)) {
+    const files: string[] = result.files;
+    if (files.length > MAX_LIST_FILES) {
+      return {
+        ...result,
+        files: files.slice(0, MAX_LIST_FILES),
+        truncated: true,
+        total: files.length,
+      };
+    }
+    return result;
+  }
+
+  // Muut: katkaise JSON-merkkijono tarvittaessa
+  try {
+    const json = JSON.stringify(result);
+    if (json.length <= MAX_TOOL_RESULT_CHARS) return result;
+    return {
+      ok: false,
+      truncated: true,
+      tool: toolName,
+      totalChars: json.length,
+      preview: truncateString(json, MAX_TOOL_RESULT_CHARS),
+    };
+  } catch {
+    const s = String(result ?? "");
+    if (s.length <= MAX_TOOL_RESULT_CHARS) return { ok: true, text: s };
+    return {
+      ok: false,
+      truncated: true,
+      tool: toolName,
+      totalChars: s.length,
+      preview: truncateString(s, MAX_TOOL_RESULT_CHARS),
+    };
+  }
 }
 
 async function resolveProjectPath(root: string, userPath: string) {
@@ -235,12 +239,20 @@ function mapOpenAiToolsToAnthropic(openAiTools: any[]) {
 }
 
 /* ===========================
+   Tool-result summary
+=========================== */
+function summarizeToolResult(toolName: string, toolResult: any): string {
+  const safe = safeToolResultForModel(toolName, toolResult);
+  const json = JSON.stringify(safe);
+  return truncateString(json, MAX_TOOL_RESULT_CHARS);
+}
+
+/* ===========================
    AGENT LOOP
 =========================== */
 export async function runAgentInternal(
   params: RunAgentInternalParams & { modelId: keyof typeof MODEL_PROFILES }
 ): Promise<RunAgentResult> {
-
   const mode: RunMode = params.mode ?? "execute";
   const projectRoot = path.resolve(params.projectRoot || PROJECT_ROOT);
   const policy = buildDefaultPolicy(projectRoot);
@@ -251,8 +263,8 @@ export async function runAgentInternal(
   }
 
   const filteredTools = (tools as any[]).filter(
-    (t) => typeof t?.function?.name === "string" &&
-      isToolAllowed(mode, t.function.name)
+    (t) =>
+      typeof t?.function?.name === "string" && isToolAllowed(mode, t.function.name)
   );
 
   const messages: any[] = [
@@ -264,17 +276,14 @@ export async function runAgentInternal(
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
 
-  //Mallin valinta konsoliin.
   console.log(
     `[AGENT] mode=${mode} role=${params.role} model=${params.modelId} deployment=${modelProfile.deployment}`
   );
 
-  const maxRounds = mode === "plan" ? 25 : MAX_TOOL_ROUNDS;
+  const maxRounds = mode === "plan" ? MAX_TOOL_ROUNDS_PLAN : MAX_TOOL_ROUNDS_EXECUTE;
 
   // ===========================
-  // Anthropic: MINIMI MUUTOS
-  // - lisää tools
-  // - tee tool-loop (tool_use -> tool_result)
+  // Anthropic: tool-loop
   // ===========================
   if (modelProfile.provider === "anthropic") {
     const system = messages
@@ -282,10 +291,8 @@ export async function runAgentInternal(
       .map((m: any) => String(m.content ?? ""))
       .join("\n");
 
-    // Muunna OpenAI tool-skeema Anthropicin tool-skeemaksi
     const claudeTools = mapOpenAiToolsToAnthropic(filteredTools);
 
-    // Pidä Claude-keskustelu erillään OpenAI "tool"-viesteistä
     const claudeMessages: any[] = messages
       .filter((m: any) => m.role === "user" || m.role === "assistant")
       .map((m: any) => ({
@@ -294,17 +301,16 @@ export async function runAgentInternal(
       }));
 
     let lastText = "";
+
     for (let round = 1; round <= maxRounds; round++) {
       const resp = await azureAnthropicMessagesCreate({
         model: modelProfile.deployment,
         max_tokens: 1024,
         system: system || undefined,
         messages: claudeMessages,
-        tools: claudeTools, // <-- PAKOLLINEN
+        tools: claudeTools,
         temperature: 0,
       });
-
-      lastText = extractClaudeText(resp) || lastText;
 
       totalPromptTokens += resp?.usage?.input_tokens ?? 0;
       totalCompletionTokens += resp?.usage?.output_tokens ?? 0;
@@ -315,14 +321,14 @@ export async function runAgentInternal(
         totalTokens: totalPromptTokens + totalCompletionTokens,
       };
 
+      lastText = extractClaudeText(resp) || lastText;
+
       const contentBlocks = resp?.content ?? [];
       const toolUses = (contentBlocks as any[]).filter((b) => b?.type === "tool_use");
 
-      // Ei tool_use -> valmis tekstivastaus
       if (toolUses.length === 0) {
-        const text = extractClaudeText(resp);
         return {
-          output: text,
+          output: lastText,
           rounds: round,
           toolUsage,
           usage: usageSummary,
@@ -330,10 +336,8 @@ export async function runAgentInternal(
         };
       }
 
-      // Tallenna assistantin tool_use -blokit keskusteluun
       claudeMessages.push({ role: "assistant", content: contentBlocks });
 
-      // Suorita toolit ja palauta tool_resultit
       const toolResultBlocks: any[] = [];
 
       for (const tu of toolUses) {
@@ -343,7 +347,11 @@ export async function runAgentInternal(
 
         if (!toolName || !toolId) {
           const err = "Malformed tool_use";
-          toolUsage.push({ toolName: toolName || "(missing)", ok: false, error: err } as any);
+          toolUsage.push({
+            toolName: toolName || "(missing)",
+            ok: false,
+            error: err,
+          } as any);
           continue;
         }
 
@@ -355,18 +363,97 @@ export async function runAgentInternal(
             type: "tool_result",
             tool_use_id: toolId,
             is_error: true,
-            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: err }) }],
+            content: [
+              { type: "text" as const, text: JSON.stringify({ ok: false, error: err }) },
+            ],
           });
           continue;
+        }
+
+        // Policy enforcement for destructive tools (Anthropic path)
+        if (
+          toolName === "write_file" ||
+          toolName === "apply_patch" ||
+          toolName === "run_tests" ||
+          toolName === "run_build" ||
+          toolName === "run_lint"
+        ) {
+          let action: ActionDescription = { kind: "runLint" }; // placeholder, overwritten below
+
+          if (toolName === "write_file") {
+            const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
+            if (isBlockedPath(abs)) {
+              const err = `Blocked path: ${abs}`;
+              toolUsage.push({ toolName, ok: false, error: err } as any);
+              toolResultBlocks.push({
+                type: "tool_result",
+                tool_use_id: toolId,
+                is_error: true,
+                content: [
+                  { type: "text" as const, text: JSON.stringify({ ok: false, error: err }) },
+                ],
+              });
+              continue;
+            }
+            const estimatedChangedLines = Math.ceil((parsedArgs.content?.length ?? 0) / 100);
+            action = { kind: "writeFile", targetPaths: [abs], estimatedChangedLines };
+          } else if (toolName === "apply_patch") {
+            const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
+            if (isBlockedPath(abs)) {
+              const err = `Blocked path: ${abs}`;
+              toolUsage.push({ toolName, ok: false, error: err } as any);
+              toolResultBlocks.push({
+                type: "tool_result",
+                tool_use_id: toolId,
+                is_error: true,
+                content: [
+                  { type: "text" as const, text: JSON.stringify({ ok: false, error: err }) },
+                ],
+              });
+              continue;
+            }
+            const estimatedChangedLines = Math.ceil((parsedArgs.patch?.length ?? 0) / 100);
+            action = { kind: "applyPatch", targetPaths: [abs], estimatedChangedLines };
+          } else if (toolName === "run_tests") {
+            action = { kind: "runTests" };
+          } else if (toolName === "run_build") {
+            action = { kind: "runBuild" };
+          } else if (toolName === "run_lint") {
+            action = { kind: "runLint" };
+          }
+
+          const policyResult = checkActionAgainstPolicy(action, policy);
+          if (!policyResult.allowed) {
+            const reason =
+              (policyResult.violations?.length ? policyResult.violations.join("; ") : "") ||
+              policyResult.reason ||
+              "not allowed";
+            const err = `Policy violation: ${reason}`;
+            toolUsage.push({ toolName, ok: false, error: err } as any);
+            toolResultBlocks.push({
+              type: "tool_result",
+              tool_use_id: toolId,
+              is_error: true,
+              content: [
+                { type: "text" as const, text: JSON.stringify({ ok: false, error: err }) },
+              ],
+            });
+            continue;
+          }
         }
 
         let toolResult: any;
 
         try {
           if (toolName === "read_file") {
-            const abs = await resolveProjectPath(projectRoot, asNonEmptyString(parsedArgs.path, "path"));
-            const maxBytes = mode === "plan" ? 4_000 : undefined;
-            const opts = { ...parsedArgs, ...(maxBytes ? { maxBytes: Math.min(parsedArgs?.maxBytes ?? maxBytes, maxBytes) } : {}) };
+            const abs = await resolveProjectPath(
+              projectRoot,
+              asNonEmptyString(parsedArgs.path, "path")
+            );
+            const requested =
+              asOptionalPositiveInt(parsedArgs?.maxBytes) ?? (mode === "plan" ? 4_000 : 12_000);
+            const hardMax = mode === "plan" ? 4_000 : 12_000;
+            const opts = { ...parsedArgs, maxBytes: Math.min(requested, hardMax) };
             toolResult = await readFileWithRange(abs, opts);
           } else if (toolName === "write_file") {
             const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
@@ -375,7 +462,30 @@ export async function runAgentInternal(
             const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
             toolResult = await applyPatch({ ...parsedArgs, filePath: abs });
           } else if (toolName === "list_files") {
-            toolResult = await listFiles({ cwd: projectRoot, patterns: ["**/*"], ignore: DEFAULT_IGNORE_PATTERNS });
+            const inputPath = typeof parsedArgs?.path === "string" ? parsedArgs.path : ".";
+            const dirAbs = await resolveProjectPath(projectRoot, inputPath);
+            const dirRel = toRel(projectRoot, dirAbs);
+            const base = dirRel && dirRel !== "" ? dirRel.replace(/\/+$/, "") : ".";
+            const patterns: string[] =
+              Array.isArray(parsedArgs?.patterns) && parsedArgs.patterns.length
+                ? parsedArgs.patterns
+                : base === "."
+                  ? ["**/*"]
+                  : [`${base}/**/*`];
+
+            const raw = await listFiles({
+              cwd: projectRoot,
+              patterns,
+              ignore: DEFAULT_IGNORE_PATTERNS,
+            });
+            const items: string[] = Array.isArray((raw as any)?.files) ? (raw as any).files : [];
+            toolResult = {
+              ok: true,
+              files: items.slice(0, MAX_LIST_FILES),
+              truncated: items.length > MAX_LIST_FILES,
+              total: items.length,
+              patterns,
+            };
           } else if (toolName === "search_in_files") {
             toolResult = await searchInFiles({ cwd: projectRoot, ...parsedArgs });
           } else if (toolName === "find_files_by_name") {
@@ -401,21 +511,25 @@ export async function runAgentInternal(
             type: "tool_result",
             tool_use_id: toolId,
             is_error: false,
-            content: [{ type: "text" as const, text: JSON.stringify(summarizeToolResult(mode, toolName, toolResult)) }],
+            content: [
+              { type: "text" as const, text: summarizeToolResult(toolName, toolResult) },
+            ],
           });
         } catch (e: any) {
-          toolUsage.push({ toolName, ok: false, error: e?.message ?? String(e) } as any);
+          const errMsg = e?.message ?? String(e);
+          toolUsage.push({ toolName, ok: false, error: errMsg } as any);
 
           toolResultBlocks.push({
             type: "tool_result",
             tool_use_id: toolId,
             is_error: true,
-            content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: e?.message ?? String(e) }) }],
+            content: [
+              { type: "text" as const, text: JSON.stringify({ ok: false, error: errMsg }) },
+            ],
           });
         }
       }
 
-      // Tool-resultit takaisin Claudelle
       claudeMessages.push({ role: "user", content: toolResultBlocks });
     }
 
@@ -425,23 +539,17 @@ export async function runAgentInternal(
       totalTokens: totalPromptTokens + totalCompletionTokens,
     };
 
-    return {
-      output:
-        lastText ||
-        `[ERROR] Anthropic tool-calling loop exceeded (${maxRounds}). Usage=${JSON.stringify(usageSummary)}`,
-      rounds: maxRounds,
-      toolUsage,
-      usage: usageSummary,
-      cost: calculateCostFromUsage(usageSummary, params.modelId),
-    };
-
+    throw new Error(
+      `Anthropic tool-calling loop exceeded (${maxRounds}). Usage=${JSON.stringify(
+        usageSummary
+      )}`
+    );
   }
 
   // ===========================
-  // OpenAI: ennallaan
+  // OpenAI: tool-loop
   // ===========================
-  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
-
+  for (let round = 1; round <= maxRounds; round++) {
     const response = await openaiClient.chat.completions.create({
       model: modelProfile.deployment,
       messages,
@@ -492,9 +600,7 @@ export async function runAgentInternal(
 
     for (const tc of toolCalls) {
       const toolName =
-        "function" in tc ? tc.function.name :
-          "custom" in tc ? tc.custom.name :
-            undefined;
+        "function" in tc ? tc.function.name : "custom" in tc ? tc.custom.name : undefined;
 
       if (!toolName || !isToolAllowed(mode, toolName)) {
         const err = `Tool not allowed in mode=${mode}: ${toolName}`;
@@ -506,23 +612,109 @@ export async function runAgentInternal(
         "function" in tc ? tc.function.arguments : JSON.stringify(tc.custom?.input ?? {});
       const parsedArgs = safeJsonParseArgs(rawArgs);
 
+      // Policy enforcement for destructive tools (OpenAI path)
+      if (
+        toolName === "write_file" ||
+        toolName === "apply_patch" ||
+        toolName === "run_tests" ||
+        toolName === "run_build" ||
+        toolName === "run_lint"
+      ) {
+        let action: ActionDescription = { kind: "runLint" }; // placeholder
+
+        if (toolName === "write_file") {
+          const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
+          if (isBlockedPath(abs)) {
+            const err = `Blocked path: ${abs}`;
+            toolUsage.push({ toolName, ok: false, error: err } as any);
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify({ ok: false, error: err }),
+            });
+            continue;
+          }
+          const estimatedChangedLines = Math.ceil((parsedArgs.content?.length ?? 0) / 100);
+          action = { kind: "writeFile", targetPaths: [abs], estimatedChangedLines };
+        } else if (toolName === "apply_patch") {
+          const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
+          if (isBlockedPath(abs)) {
+            const err = `Blocked path: ${abs}`;
+            toolUsage.push({ toolName, ok: false, error: err } as any);
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify({ ok: false, error: err }),
+            });
+            continue;
+          }
+          const estimatedChangedLines = Math.ceil((parsedArgs.patch?.length ?? 0) / 100);
+          action = { kind: "applyPatch", targetPaths: [abs], estimatedChangedLines };
+        } else if (toolName === "run_tests") {
+          action = { kind: "runTests" };
+        } else if (toolName === "run_build") {
+          action = { kind: "runBuild" };
+        } else if (toolName === "run_lint") {
+          action = { kind: "runLint" };
+        }
+
+        const policyResult = checkActionAgainstPolicy(action, policy);
+        if (!policyResult.allowed) {
+          const reason =
+            (policyResult.violations?.length ? policyResult.violations.join("; ") : "") ||
+            policyResult.reason ||
+            "not allowed";
+          const err = `Policy violation: ${reason}`;
+          toolUsage.push({ toolName, ok: false, error: err } as any);
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({ ok: false, error: err }),
+          });
+          continue;
+        }
+      }
+
       let toolResult: any;
 
-      /* ===== Tool dispatch ===== */
       try {
         if (toolName === "read_file") {
-            const abs = await resolveProjectPath(projectRoot, asNonEmptyString(parsedArgs.path, "path"));
-            const maxBytes = mode === "plan" ? 4_000 : undefined;
-            const opts = { ...parsedArgs, ...(maxBytes ? { maxBytes: Math.min(parsedArgs?.maxBytes ?? maxBytes, maxBytes) } : {}) };
-            toolResult = await readFileWithRange(abs, opts);
-          } else if (toolName === "write_file") {
+          const abs = await resolveProjectPath(
+            projectRoot,
+            asNonEmptyString(parsedArgs.path, "path")
+          );
+          const requested =
+            asOptionalPositiveInt(parsedArgs?.maxBytes) ?? (mode === "plan" ? 4_000 : 12_000);
+          const hardMax = mode === "plan" ? 4_000 : 12_000;
+          const opts = { ...parsedArgs, maxBytes: Math.min(requested, hardMax) };
+          toolResult = await readFileWithRange(abs, opts);
+        } else if (toolName === "write_file") {
           const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
           toolResult = await writeFileRaw(abs, parsedArgs.content);
         } else if (toolName === "apply_patch") {
           const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
           toolResult = await applyPatch({ ...parsedArgs, filePath: abs });
         } else if (toolName === "list_files") {
-          toolResult = await listFiles({ cwd: projectRoot, patterns: ["**/*"], ignore: DEFAULT_IGNORE_PATTERNS });
+          const inputPath = typeof parsedArgs?.path === "string" ? parsedArgs.path : ".";
+          const dirAbs = await resolveProjectPath(projectRoot, inputPath);
+          const dirRel = toRel(projectRoot, dirAbs);
+          const base = dirRel && dirRel !== "" ? dirRel.replace(/\/+$/, "") : ".";
+          const patterns: string[] =
+            Array.isArray(parsedArgs?.patterns) && parsedArgs.patterns.length
+              ? parsedArgs.patterns
+              : base === "."
+                ? ["**/*"]
+                : [`${base}/**/*`];
+
+          const raw = await listFiles({ cwd: projectRoot, patterns, ignore: DEFAULT_IGNORE_PATTERNS });
+          const items: string[] = Array.isArray((raw as any)?.files) ? (raw as any).files : [];
+          toolResult = {
+            ok: true,
+            files: items.slice(0, MAX_LIST_FILES),
+            truncated: items.length > MAX_LIST_FILES,
+            total: items.length,
+            patterns,
+          };
         } else if (toolName === "search_in_files") {
           toolResult = await searchInFiles({ cwd: projectRoot, ...parsedArgs });
         } else if (toolName === "find_files_by_name") {
@@ -545,7 +737,7 @@ export async function runAgentInternal(
         messages.push({
           role: "tool",
           tool_call_id: tc.id,
-          content: JSON.stringify(summarizeToolResult(mode, toolName, toolResult)),
+          content: summarizeToolResult(toolName, toolResult),
         });
 
         toolUsage.push({ toolName, ok: true } as any);
@@ -567,6 +759,6 @@ export async function runAgentInternal(
   };
 
   throw new Error(
-    `Tool-calling loop exceeded (${MAX_TOOL_ROUNDS}). Usage=${JSON.stringify(usageSummary)}`
+    `Tool-calling loop exceeded (${maxRounds}). Usage=${JSON.stringify(usageSummary)}`
   );
 }
