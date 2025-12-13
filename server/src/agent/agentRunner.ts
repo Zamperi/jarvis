@@ -43,6 +43,63 @@ const DEFAULT_IGNORE_PATTERNS = [
   "**/*.log",
 ];
 
+
+/* ===========================
+   Tool result shaping (token control)
+=========================== */
+const PLAN_MAX_TOOL_RESULT_CHARS = 6_000;
+const EXEC_MAX_TOOL_RESULT_CHARS = 20_000;
+const PLAN_MAX_LIST_FILES = 250;
+const EXEC_MAX_LIST_FILES = 2_000;
+
+function truncateText(s: string, max: number) {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `\n...[truncated ${s.length - max} chars]`;
+}
+
+function summarizeToolResult(mode: RunMode, toolName: string, toolResult: any) {
+  const maxChars = mode === "plan" ? PLAN_MAX_TOOL_RESULT_CHARS : EXEC_MAX_TOOL_RESULT_CHARS;
+
+  // list_files -> cap list size hard
+  if (toolName === "list_files" && Array.isArray(toolResult)) {
+    const cap = mode === "plan" ? PLAN_MAX_LIST_FILES : EXEC_MAX_LIST_FILES;
+    return {
+      ok: true,
+      count: toolResult.length,
+      sample: toolResult.slice(0, cap),
+      truncated: toolResult.length > cap,
+    };
+  }
+
+  // read_file -> cap content
+  if (toolName === "read_file" && toolResult && typeof toolResult === "object" && typeof toolResult.content === "string") {
+    return {
+      ...toolResult,
+      content: truncateText(toolResult.content, maxChars),
+      truncated: toolResult.content.length > maxChars,
+    };
+  }
+
+  // generic string cap
+  if (typeof toolResult === "string") {
+    return truncateText(toolResult, maxChars);
+  }
+
+  // generic object/array cap by JSON size
+  try {
+    const json = JSON.stringify(toolResult);
+    if (json.length <= maxChars) return toolResult;
+    return {
+      ok: true,
+      truncated: true,
+      note: `Tool result JSON exceeded ${maxChars} chars`,
+      preview: truncateText(json, maxChars),
+    };
+  } catch {
+    return { ok: false, error: "Failed to serialize tool result" };
+  }
+}
+
 /* ===========================
    Usage & Cost
 =========================== */
@@ -308,7 +365,9 @@ export async function runAgentInternal(
         try {
           if (toolName === "read_file") {
             const abs = await resolveProjectPath(projectRoot, asNonEmptyString(parsedArgs.path, "path"));
-            toolResult = await readFileWithRange(abs, parsedArgs);
+            const maxBytes = mode === "plan" ? 4_000 : undefined;
+            const opts = { ...parsedArgs, ...(maxBytes ? { maxBytes: Math.min(parsedArgs?.maxBytes ?? maxBytes, maxBytes) } : {}) };
+            toolResult = await readFileWithRange(abs, opts);
           } else if (toolName === "write_file") {
             const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
             toolResult = await writeFileRaw(abs, parsedArgs.content);
@@ -342,7 +401,7 @@ export async function runAgentInternal(
             type: "tool_result",
             tool_use_id: toolId,
             is_error: false,
-            content: [{ type: "text" as const, text: JSON.stringify(toolResult) }],
+            content: [{ type: "text" as const, text: JSON.stringify(summarizeToolResult(mode, toolName, toolResult)) }],
           });
         } catch (e: any) {
           toolUsage.push({ toolName, ok: false, error: e?.message ?? String(e) } as any);
@@ -452,9 +511,11 @@ export async function runAgentInternal(
       /* ===== Tool dispatch ===== */
       try {
         if (toolName === "read_file") {
-          const abs = await resolveProjectPath(projectRoot, asNonEmptyString(parsedArgs.path, "path"));
-          toolResult = await readFileWithRange(abs, parsedArgs);
-        } else if (toolName === "write_file") {
+            const abs = await resolveProjectPath(projectRoot, asNonEmptyString(parsedArgs.path, "path"));
+            const maxBytes = mode === "plan" ? 4_000 : undefined;
+            const opts = { ...parsedArgs, ...(maxBytes ? { maxBytes: Math.min(parsedArgs?.maxBytes ?? maxBytes, maxBytes) } : {}) };
+            toolResult = await readFileWithRange(abs, opts);
+          } else if (toolName === "write_file") {
           const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
           toolResult = await writeFileRaw(abs, parsedArgs.content);
         } else if (toolName === "apply_patch") {
@@ -484,7 +545,7 @@ export async function runAgentInternal(
         messages.push({
           role: "tool",
           tool_call_id: tc.id,
-          content: JSON.stringify(toolResult),
+          content: JSON.stringify(summarizeToolResult(mode, toolName, toolResult)),
         });
 
         toolUsage.push({ toolName, ok: true } as any);
