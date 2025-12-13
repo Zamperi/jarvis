@@ -85,43 +85,12 @@ ${entry.planText}
  */
 router.post("/approve", async (req, res, next) => {
     try {
-        const { runId } = req.body ?? {};
+        const { runId, projectRoot } = req.body ?? {};
         if (typeof runId !== "string" || !runId.trim()) {
             return res.status(400).json({ ok: false, error: "runId required" });
         }
 
-        const entry = approvePlan(runId);
-        if (!entry) {
-            return res.status(404).json({ ok: false, error: "plan not found" });
-        }
-
-        return res.json({ ok: true, runId });
-    } catch (err) {
-        next(err);
-    }
-});
-
-/**
- * POST /task/execute
- * Body: { runId: string }
- */
-router.post("/execute", async (req, res, next) => {
-    try {
-        const { runId } = req.body ?? {};
-        if (typeof runId !== "string" || !runId.trim()) {
-            return res.status(400).json({ ok: false, error: "runId required" });
-        }
-
-        const entry = getPlan(runId);
-        if (!entry) {
-            return res.status(404).json({ ok: false, error: "plan not found" });
-        }
-        if (!entry.approved) {
-            return res.status(409).json({ ok: false, error: "plan not approved" });
-        }
-
-        // Read the (possibly edited) plan file at execution time
-        const effectiveProjectRoot = path.resolve(entry.projectRoot ?? process.cwd());
+        const effectiveProjectRoot = path.resolve(projectRoot ?? process.cwd());
         const planPathAbs = path.join(
             effectiveProjectRoot,
             "docs",
@@ -130,39 +99,112 @@ router.post("/execute", async (req, res, next) => {
         );
 
         let planText: string;
-
         try {
             planText = await fs.readFile(planPathAbs, "utf-8");
-        } catch (e: any) {
-            return res.status(500).json({
-                ok: false,
-                error: `Plan file not found or unreadable: docs/plans/${runId}.plan.md (root=${effectiveProjectRoot})`,
-            });
+        } catch {
+            return res.status(404).json({ ok: false, error: "plan file not found" });
         }
 
+        // Päivitä Status: DRAFT -> Status: APPROVED
+        const updated = planText.replace(
+            /^Status:\s*DRAFT\s*$/m,
+            `Status: APPROVED`
+        );
 
-        const userMessage = `APPROVED PLAN (SOURCE OF TRUTH):
-${planText}
+        if (updated === planText) {
+            // jos Status-riviä ei löydy, lisätään varovasti
+            planText =
+                planText.replace(
+                    /^Role:\s*(.*)\s*$/m,
+                    (m) => `${m}\nStatus: APPROVED`
+                );
+        } else {
+            planText = updated;
+        }
 
-TASK FILE PATH: ${entry.taskPath}
+        await fs.writeFile(planPathAbs, planText, "utf-8");
 
-Instructions:
-- Implement ONLY what is described in the approved plan above.
-- If the plan contains extra assumptions not present in the task, follow the plan (it was human-edited).
-- At the end, output the required EXECUTE summary format.
-`;
+        // (Optional) pidä vanha in-memory approve edelleen jos haluat:
+        // approvePlan(runId);
 
-        const result = await agentService.run({
-            role: entry.role,
-            message: userMessage,
-            projectRoot: entry.projectRoot,
-            mode: "execute",
-        });
-
-        return res.json({ ok: true, runId, output: result.output, cost: result.cost });
+        return res.json({ ok: true, runId });
     } catch (err) {
         next(err);
     }
 });
+
+
+/**
+ * POST /task/execute
+ * Body: { runId: string }
+ */
+router.post("/execute", async (req, res, next) => {
+  try {
+    const { runId, projectRoot } = req.body ?? {};
+    if (typeof runId !== "string" || !runId.trim()) {
+      return res.status(400).json({ ok: false, error: "runId required" });
+    }
+
+    const effectiveProjectRoot = path.resolve(projectRoot ?? process.cwd());
+    const planPathAbs = path.join(
+      effectiveProjectRoot,
+      "docs",
+      "plans",
+      `${runId}.plan.md`
+    );
+
+    let planText: string;
+    try {
+      planText = await fs.readFile(planPathAbs, "utf-8");
+    } catch {
+      return res.status(404).json({ ok: false, error: "plan file not found" });
+    }
+
+    // Vaadi hyväksyntä tiedostosta
+    if (!/^Status:\s*APPROVED\s*$/m.test(planText)) {
+      return res.status(409).json({ ok: false, error: "plan not approved" });
+    }
+
+    // Parsitaan metadata headerista
+    const roleMatch = planText.match(/^Role:\s*(.+)\s*$/m);
+    const taskMatch = planText.match(/^Task:\s*(.+)\s*$/m);
+
+    const role = roleMatch?.[1]?.trim();
+    const taskPath = taskMatch?.[1]?.trim();
+
+    if (!role) {
+      return res.status(500).json({ ok: false, error: "Role missing from plan file" });
+    }
+    if (!taskPath) {
+      return res.status(500).json({ ok: false, error: "Task missing from plan file" });
+    }
+
+    const userMessage = `APPROVED PLAN (SOURCE OF TRUTH):
+${planText}
+
+TASK FILE PATH: ${taskPath}
+
+Hard rules:
+- This plan is already approved. Do NOT ask for confirmation. Do NOT ask questions.
+- Begin implementation immediately.
+- Use tools as needed.
+- Implement ONLY what is described in the approved plan above.
+- If the plan contains the phrase "APPROVAL REQUIRED", ignore it (approval already happened via /task-approve).
+- At the end, output the required EXECUTE summary format.
+`;
+
+    const result = await agentService.run({
+      role: role as AgentRole,
+      message: userMessage,
+      projectRoot: effectiveProjectRoot,
+      mode: "execute",
+    });
+
+    return res.json({ ok: true, runId, output: result.output, cost: result.cost });
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 export default router;
