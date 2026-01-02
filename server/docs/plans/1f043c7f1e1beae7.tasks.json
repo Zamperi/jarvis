@@ -1,0 +1,20 @@
+{
+  "runId": "1f043c7f1e1beae7",
+  "taskPath": "docs/tasks/test-task.md",
+  "projectRoot": "C:/codes/agent/server",
+  "role": "coder",
+  "status": "pending",
+  "tasks": [
+    {
+      "id": "1",
+      "title": "Task",
+      "status": "PENDING",
+      "files": [],
+      "description": "# Test task\r\n\r\nTee uusi tiedosto `docs/output/hello.txt` jonka sisältö on:\r\nHello from execute-mode\r\n\r\nLisäksi tee `docs/output/summary.md` jossa on lyhyt bullet-lista siitä mitä teit.",
+      "attempts": 0,
+      "logs": []
+    }
+  ],
+  "createdAt": "2025-12-13T20:07:53.751Z",
+  "updatedAt": "2025-12-13T20:07:53.751Z"
+}

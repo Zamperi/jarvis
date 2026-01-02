@@ -1,10 +1,10 @@
 // src/tools/fileTools.ts
-
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import fg from "fast-glob";
 import { applyPatch as applyTextPatch } from "diff";
+import { checkActionAgainstPolicy, ActionDescription, PolicyConfig } from "./policyTools";
 
 export interface FileRangeOptions {
   fromLine?: number;
@@ -170,6 +170,31 @@ export const writeFileTool = {
     try {
       const resolvedPath = path.resolve(process.cwd(), filePath);
       const dir = path.dirname(resolvedPath);
+
+      // Prepare action description for policy check
+      const action: ActionDescription = {
+        kind: "writeFile",
+        targetPaths: [resolvedPath],
+        description: `Write file at ${resolvedPath}`,
+      };
+
+      // Prepare a simple policy config (could be enhanced to get real config)
+      const policy: PolicyConfig = {
+        projectRoot: process.cwd(),
+        allowedPaths: [process.cwd()],
+        readOnlyPaths: [],
+        maxFilesChanged: 10,
+        maxTotalChangedLines: 1000,
+      };
+
+      const policyResult = checkActionAgainstPolicy(action, policy);
+      if (!policyResult.allowed) {
+        return {
+          success: false,
+          error: `Policy check failed: ${policyResult.reason || "Unknown reason"}`,
+          violations: policyResult.violations,
+        };
+      }
 
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(resolvedPath, content, "utf-8");

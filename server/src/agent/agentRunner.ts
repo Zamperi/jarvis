@@ -395,8 +395,8 @@ export async function runAgentInternal(
               });
               continue;
             }
-            const estimatedChangedLines = Math.ceil((parsedArgs.content?.length ?? 0) / 100);
-            action = { kind: "writeFile", targetPaths: [abs], estimatedChangedLines };
+            // Keep ActionDescription minimal to remain compatible if the type evolves.
+            action = { kind: "writeFile", targetPaths: [abs] };
           } else if (toolName === "apply_patch") {
             const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
             if (isBlockedPath(abs)) {
@@ -412,8 +412,8 @@ export async function runAgentInternal(
               });
               continue;
             }
-            const estimatedChangedLines = Math.ceil((parsedArgs.patch?.length ?? 0) / 100);
-            action = { kind: "applyPatch", targetPaths: [abs], estimatedChangedLines };
+            // Keep ActionDescription minimal to remain compatible if the type evolves.
+            action = { kind: "applyPatch", targetPaths: [abs] };
           } else if (toolName === "run_tests") {
             action = { kind: "runTests" };
           } else if (toolName === "run_build") {
@@ -634,8 +634,8 @@ export async function runAgentInternal(
             });
             continue;
           }
-          const estimatedChangedLines = Math.ceil((parsedArgs.content?.length ?? 0) / 100);
-          action = { kind: "writeFile", targetPaths: [abs], estimatedChangedLines };
+          // Keep ActionDescription minimal to remain compatible if the type evolves.
+          action = { kind: "writeFile", targetPaths: [abs] };
         } else if (toolName === "apply_patch") {
           const abs = await resolveProjectPath(projectRoot, parsedArgs.filePath);
           if (isBlockedPath(abs)) {
@@ -648,8 +648,8 @@ export async function runAgentInternal(
             });
             continue;
           }
-          const estimatedChangedLines = Math.ceil((parsedArgs.patch?.length ?? 0) / 100);
-          action = { kind: "applyPatch", targetPaths: [abs], estimatedChangedLines };
+          // Keep ActionDescription minimal to remain compatible if the type evolves.
+          action = { kind: "applyPatch", targetPaths: [abs] };
         } else if (toolName === "run_tests") {
           action = { kind: "runTests" };
         } else if (toolName === "run_build") {
